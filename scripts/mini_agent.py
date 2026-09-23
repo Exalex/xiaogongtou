@@ -241,7 +241,77 @@ def collect_elements(state, limit=110):
     return out
 
 
+def parse_uiauto_xml(xml):
+    """uiautomator dump XML → [(idx, cx, cy, label, clickable)]"""
+    import xml.etree.ElementTree as ET
+    if not xml:
+        return []
+    cut = xml.find("<hierarchy")
+    if cut > 0:
+        xml = xml[cut:]
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        try:
+            root = ET.fromstring(xml[:xml.rindex("</hierarchy>") + len("</hierarchy>")])
+        except Exception:
+            return []
+    out = []
+
+    def visit(n):
+        t = (n.get("text") or "").strip()
+        d = (n.get("content-desc") or "").strip()
+        label = t if t else d
+        clickable = (n.get("clickable") == "true") or (n.get("long-clickable") == "true")
+        m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", n.get("bounds") or "")
+        if label and m:
+            cx = (int(m.group(1)) + int(m.group(3))) // 2
+            cy = (int(m.group(2)) + int(m.group(4))) // 2
+            out.append((len(out), cx, cy, label[:50], clickable))
+        for c in n:
+            visit(c)
+
+    visit(root)
+    return out
+
+
+def uiauto_elements(timeout=8.0):
+    """经 root 桥（uidump-bridge.sh）取 uiautomator 完整树；失败返回 []。
+    用途：portal 的 a11y 树会过滤"不重要"视图（如微博信息流），此处补盲。"""
+    req = os.path.expanduser("~/bridge/.uidump_req")
+    out = os.path.expanduser("~/bridge/.uidump.xml")
+    try:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        with open(req, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                if os.path.getsize(out) > 100:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.15)
+        with open(out, encoding="utf-8", errors="replace") as f:
+            elems = parse_uiauto_xml(f.read())
+        # 限流：uiautomator 树可能几百个元素（Jev criteria 上限 255 / prompt 也会爆炸）
+        # 保留：可点元素优先（最多 80）+ 有意义的文本元素（最多 40），重新编号
+        clicks = [e for e in elems if e[4]][:80]
+        texts = [e for e in elems if not e[4] and len(e[3]) >= 2][:40]
+        merged = clicks + texts
+        return [(i, e[1], e[2], e[3], e[4]) for i, e in enumerate(merged)]
+    except Exception as e:
+        print("[agent] uiauto 补盲失败: %r" % (e,))
+        return []
+
+
 def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg=""):
+    # 保护：Jev 的 Choice criteria 选项上限 255（含动作项）——元素过多时截断
+    if len(elems) > 180:
+        elems = elems[:180]
     criteria = {}
     answer_criteria = {}
     for idx, cx, cy, label, clickable in elems:
@@ -250,6 +320,7 @@ def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg
     criteria["scroll_down"] = "目标不在屏幕内，向下滑动"
     criteria["scroll_up"] = "目标不在屏幕内，向上滑动"
     criteria["back"] = "返回上一页"
+    criteria["wait"] = "页面正在加载/刚要切换，先等一等（仅加载场景）"
     criteria["done"] = "任务已完成（屏幕上已能看到所需信息）"
     # 相关应用：允许"直接打开应用"（避免在当前 App 里瞎点）
     if related_apps:
@@ -270,6 +341,9 @@ def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg
         names = "、".join("%s（%s）" % (ra.get("label"), ra.get("package")) for ra in related_apps)
         target_instr += ("\n本机相关应用：%s。若任务需要用某个应用而现在不在其中，"
                          "优先选「打开应用…」而不是在当前应用里乱点。" % names)
+    hint = app_hints().get(cur_pkg or "")
+    if hint:
+        target_instr += "\n本 App 使用要点：%s" % hint
     questions = {
         "target": {"type": "choice",
             "instructions": target_instr,
@@ -311,6 +385,8 @@ def jev_to_action(ans, elems, related_apps=None):
         return {"action": "scroll", "direction": "up", "confidence": conf}
     if ch == "back":
         return {"action": "key", "key_code": 4, "confidence": conf}
+    if ch == "wait":
+        return {"action": "wait", "seconds": 2, "confidence": conf}
     if ch == "done":
         return {"action": "done", "confidence": conf}
     return {"action": "wait", "confidence": conf}
@@ -320,6 +396,26 @@ def qwen_summary(task, screen_text):
     messages = [{"role": "user", "content":
                  "任务：%s\n\n当前屏幕元素：\n%s\n\n请用一句话给出任务要求的答案。" % (task, screen_text[:3000])}]
     return call_llm(messages)
+
+
+def qwen_verify(task, summary, screen_text):
+    """复核 done：summary 的关键信息能否在屏幕文本中找到依据（防幻觉）。
+    返回 (ok, reason)；复核本身失败时一律放行（不阻塞正常收尾）。"""
+    prompt = ("任务：%s\n\n待核实的结果：%s\n\n当前屏幕文本：\n%s\n\n"
+              "请判断：以上结果里的关键信息（名称/数字/列表项）是否能在当前屏幕文本中找到依据？"
+              "找不到依据 = 该结果可能是凭空编造的（幻觉），应判 false。"
+              "只输出一个 JSON：{\"ok\": true 或 false, \"reason\": \"一句话理由\"}"
+              % (task, summary[:400], screen_text[:3000]))
+    reply = call_llm([{"role": "user", "content": prompt}])
+    t = re.sub(r"<think[^>]*>.*?</think[^>]*>", " ", reply, flags=re.S)
+    m = re.search(r"\{[^{}]*\}", t, re.S)
+    if not m:
+        return True, ""
+    try:
+        d = json.loads(m.group(0))
+        return bool(d.get("ok", True)), str(d.get("reason", ""))[:120]
+    except Exception:
+        return True, ""
 
 
 # ---------------------------------------------------------------- 调试 trace
@@ -444,6 +540,32 @@ def action_to_line(act):
 
 
 # ---------------------------------------------------------------- 应用名解析（治"包名幻觉"）
+# ---------------------------------------------------------------- App 使用要点（经验卡雏形）
+APP_HINTS_BUILTIN = {
+    "com.sina.weibo": ("看热搜榜：点底部导航「发现」→ 页面上方就是热搜榜；若无，看搜索框下方「热搜」。"
+                       "底部导航（左→右）：首页 / 视频 / 发现 / 消息 / 我。"),
+    "com.android.settings": "设置项都在首屏列表；找不到就向下滑动。电池电量：设置 → 电池。",
+    "com.coloros.weather2": "打开即见当前温度与天气；未来几天预报向下滑动。",
+    "com.tencent.mm": "底部导航（左→右）：微信 / 通讯录 / 发现 / 我。",
+}
+_APP_HINTS = None
+
+
+def app_hints():
+    """App 使用要点 = 内置 + ~/bridge/skills/apps.json（外部可覆盖/补充，不进 git）"""
+    global _APP_HINTS
+    if _APP_HINTS is None:
+        _APP_HINTS = dict(APP_HINTS_BUILTIN)
+        try:
+            with open(os.path.expanduser("~/bridge/skills/apps.json"), encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                _APP_HINTS.update({str(k): str(v) for k, v in d.items()})
+        except Exception:
+            pass
+    return _APP_HINTS
+
+
 def resolve_package(want, apps):
     """把模型给出的包名解析成本机真实包名（精确 → 关键词模糊）。
     例：com.miui.weather → com.coloros.weather2（本机天气 App）。
@@ -615,8 +737,16 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
         app_hint = "\n\n本机可用应用：" + "、".join(
             "%s(%s)" % (ra.get("label"), ra.get("package")) for ra in related_apps) + \
             "。如需打开应用请严格使用以上包名（不要臆造别的包名）。"
-    user = ("任务: %s\n\n第 %d 步。当前屏幕元素清单：\n%s%s%s\n\n"
-            "请输出下一步动作 JSON。" % (task, step, screen, exp_block, app_hint))
+    app_note = ""
+    try:
+        _pk = (state.get("phone_state") or {}).get("packageName") or ""
+        _h = app_hints().get(_pk)
+        if _h:
+            app_note = "\n\n本 App 使用要点：%s" % _h
+    except Exception:
+        pass
+    user = ("任务: %s\n\n第 %d 步。当前屏幕元素清单：\n%s%s%s%s\n\n"
+            "请输出下一步动作 JSON。" % (task, step, screen, exp_block, app_hint, app_note))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-10:] + \
                [{"role": "user", "content": user}]
     reply = call_llm(messages)
@@ -669,6 +799,10 @@ def main():
     aborted = False
     exec_log = []
     fail_counts = {}   # 动作签名 -> 连续失败次数（>=2 硬阻断）
+    no_effect = {}     # tap 签名 -> 连续"屏幕无变化"次数（>=2 视为无效点击）
+    last_sig, last_ok, last_hash = None, None, None
+    block_streak = 0   # 连续被系统拒绝的次数
+    done_rejects = 0   # done 被防幻觉复核驳回的次数（上限 2）
 
     print("[agent] task: %s" % task)
     print("[agent] mode: %s | start engine: %s | upgrade-after: %d | max-steps: %d" %
@@ -704,7 +838,37 @@ def main():
             aborted = True
             break
         elems = collect_elements(state)
+        # —— 感知补盲：portal 树元素过少（内容区被标记"不重要"被过滤）→ 用 uiautomator 完整树 ——
+        if len(elems) < 8:
+            extra = uiauto_elements()
+            if len(extra) > len(elems):
+                print("[step %d] 感知补盲: portal %d -> uiautomator %d 元素"
+                      % (step, len(elems), len(extra)))
+                tracer.log(step, "result", "感知补盲 %d->%d 元素" % (len(elems), len(extra)))
+                elems = extra
         screen_hash = hash(tuple((e[3][:24], e[1] // 16, e[2] // 16) for e in elems))
+
+        # —— 上一步效果补记：用本步屏幕对比上一步执行后的变化，回传给模型（治"点了没反应还在点"） ——
+        if last_sig is not None:
+            changed = (screen_hash != last_hash)
+            if last_ok and not changed:
+                if last_sig[0] == "tap":
+                    no_effect[last_sig] = no_effect.get(last_sig, 0) + 1
+                note = "（系统补充）上一步动作已执行，但屏幕没有任何变化——可能没点中/无效。"
+                if last_sig[0] == "tap" and no_effect.get(last_sig, 0) >= 2:
+                    note += ("该点击已连续 %d 次无效果，请不要再点这里，换一种做法。"
+                             % no_effect[last_sig])
+                    tracer.log(step, "result", "无效点击标记: %s" % (last_sig,))
+                history.append({"role": "user", "content": note})
+            elif changed:
+                no_effect.clear()   # 屏幕已变化（加载完成/页面切换）→ 解除全部"无效"标记
+            last_sig = None
+        # —— 阶段性终点检查：每 6 步提醒引擎查看"答案是否已在屏幕上" ——
+        if step > 1 and step % 6 == 1:
+            history.append({"role": "user", "content":
+                            "（系统提醒）请先仔细看当前屏幕：任务要求的信息（名称/数值/列表等）"
+                            "是否已经出现？如果已经能看到，请立即输出 done，并在 summary 里给出答案；"
+                            "如果没有，再继续操作。"})
         try:
             act, eng, dec_dt, ti = decide(step, task, state, history, engine_now, elems,
                                           experience, related_apps)
@@ -732,6 +896,27 @@ def main():
                     summary = qwen_summary(task, render_tree(state))
                 except Exception as e:
                     summary = "(总结生成失败: %r)" % e
+            # —— 防幻觉复核：结果须能在屏幕上找到依据（"无法完成"如实报告的直接放行） ——
+            screen_text = " ".join(e[3] for e in elems)
+            if (summary and done_rejects < 2 and len(screen_text) >= 30
+                    and not summary.startswith("无法")):
+                try:
+                    v_ok, v_reason = qwen_verify(task, summary, screen_text)
+                except Exception:
+                    v_ok, v_reason = True, ""
+                if not v_ok:
+                    done_rejects += 1
+                    print("[step %d] DONE 被驳回：%s" % (step, v_reason))
+                    tracer.log(step, "result", "done被驳回: %s" % v_reason)
+                    tracer.log(step, "action", "done(被驳回)")
+                    history.append({"role": "assistant",
+                                    "content": json.dumps(act, ensure_ascii=False)})
+                    history.append({"role": "user", "content":
+                                    "你的完成申报被系统驳回：%s。任务尚未真正完成，请继续操作；"
+                                    "如果确实无法完成，请再次输出 done，并在 summary 中如实说明"
+                                    "「无法完成：原因」。" % (v_reason or "结果在屏幕上找不到依据")})
+                    time.sleep(1.0)
+                    continue
             print("[agent] engine-usage: jev=%d qwen=%d" % (usage["jev"], usage["qwen"]))
             print("[agent] DONE: %s" % summary)
             tracer.log(step, "done", summary)
@@ -741,12 +926,13 @@ def main():
                 print("[agent] 经验已保存: %d 步 → ~/bridge/skills/examples.json" % len(exec_log))
             return 0
 
-        # —— 重复失败动作硬阻断（同一动作连续失败 ≥2 次 → 拒绝执行，逼模型换策略） ——
+        # —— 重复失败/无效动作硬阻断（连续失败 ≥2 或连续无效果 ≥2 → 拒绝执行，逼模型换策略） ——
         sig = Progress.sig_of(act)
-        blocked = sig is not None and fail_counts.get(sig, 0) >= 2
+        blocked = sig is not None and (fail_counts.get(sig, 0) >= 2
+                                       or no_effect.get(sig, 0) >= 2)
         if blocked:
             ok = False
-            exec_err = "该动作已连续失败多次（很可能无效/目标不存在）"
+            exec_err = "该动作已连续多次失败/无效果（很可能无效/目标不存在）"
             print("[step %d] BLOCK 重复失败动作: %s" % (step, sig))
         else:
             try:
@@ -792,21 +978,29 @@ def main():
                 fail_counts[sig] = 0
             else:
                 fail_counts[sig] = fail_counts.get(sig, 0) + 1
+        # 记录本步，供下一步"效果补记"（屏幕变化对比）
+        last_sig, last_ok, last_hash = sig, ok, screen_hash
 
         tracer.log(step, "result", ("ok: " if ok else "FAIL: ") + action_to_line(act),
                    ok=ok, ms=int((time.time() - t_step) * 1000), blocked=blocked)
         exec_log.append(action_to_line(act) + ("" if ok else "（失败）"))
         history.append({"role": "assistant", "content": json.dumps(act, ensure_ascii=False)})
         if blocked:
+            block_streak += 1
             extra = ""
             if related_apps and a == "open_app":
                 extra = " 本机可用的相关应用：" + "、".join(
                     "%s(%s)" % (ra["label"], ra["package"]) for ra in related_apps) + "。"
-            history.append({"role": "user", "content":
-                            "上一步没有执行：动作 %s 已连续失败多次（很可能无效/目标不存在）。"
-                            "请换一种完全不同的做法（换应用/换入口/用搜索），不要重复同一动作。%s"
-                            % (json.dumps(act, ensure_ascii=False)[:140], extra)})
+            msg = ("上一步没有执行：动作 %s 已被系统拒绝（连续失败/无效果）。"
+                   "请换一种完全不同的做法（换应用/换入口/用搜索），不要重复同一动作。%s"
+                   % (json.dumps(act, ensure_ascii=False)[:140], extra))
+            if block_streak >= 3:
+                msg += ("（系统警告：该动作已被连续拒绝 %d 次，坐标已禁用）"
+                        "若你认为任务所需的答案已经显示在屏幕上，请立即输出 done 并在 summary 给出答案；"
+                        "否则必须彻底改变策略。" % block_streak)
+            history.append({"role": "user", "content": msg})
         else:
+            block_streak = 0
             history.append({"role": "user", "content":
                             "上一步动作执行%s%s。" % ("成功" if ok else "失败",
                                                       ("：" + exec_err) if (not ok and exec_err) else "")})
@@ -823,7 +1017,8 @@ def main():
             prog.score = 0
             history.append({"role": "user", "content":
                             "快速引擎连续多步无进展（重复动作/屏幕无变化）。现在由更强的模型接管："
-                            "请根据当前屏幕与任务重新规划，避免重复此前无效动作。"})
+                            "请根据当前屏幕与任务重新规划，避免重复此前无效动作。"
+                            "若屏幕上已有任务所需的信息，请直接输出 done 并给出答案。"})
         time.sleep(0.8)
 
     print("[agent] engine-usage: jev=%d qwen=%d" % (usage["jev"], usage["qwen"]))
