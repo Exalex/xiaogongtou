@@ -69,6 +69,27 @@ public final class Notifier {
         }
     }
 
+    /** 运行中进度更新：第 N 步 + 最新动作（下拉通知栏可见） */
+    public static void updateRunning(Context c, String task, int step, String line) {
+        ensureChannels(c);
+        Notification.Builder b = base(c, CH_RESULT);
+        b.setContentTitle("正在干活…（第 " + step + " 步）");
+        String txt = task == null || task.isEmpty() ? "" : task;
+        if (line != null && !line.isEmpty()) {
+            if (line.length() > 120) {
+                line = line.substring(line.length() - 120);
+            }
+            txt = txt + "\n" + line;
+        }
+        b.setContentText(txt);
+        b.setStyle(new Notification.BigTextStyle().bigText(txt));
+        b.setContentIntent(pi(c, MainActivity.class, 2));
+        b.setOngoing(true);
+        b.setOnlyAlertOnce(true);
+        b.setShowWhen(false);
+        notify(c, ID_RUNNING, b);
+    }
+
     public static void showResult(Context c, String title, String text) {
         ensureChannels(c);
         cancelRunning(c);

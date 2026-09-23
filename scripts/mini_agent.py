@@ -50,6 +50,7 @@ OUT_DIR = os.path.expanduser("~/bridge/out")
 TRACE_PATH = os.environ.get("TRACE_PATH", "")  # 每任务独立 trace（由控制台注入 ~/bridge/runs/<rid>.trace.jsonl）
 SKILLS_DIR = os.path.expanduser("~/bridge/skills")
 EXAMPLES_PATH = os.path.join(SKILLS_DIR, "examples.json")
+FAILURES_PATH = os.path.join(SKILLS_DIR, "failures.json")
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -68,6 +69,7 @@ SYSTEM_PROMPT = (
     '- {"action":"wait"} 等待界面加载\n'
     '- {"action":"done","summary":"给用户的最终答案"} 任务完成时输出\n'
     "规则：一次只做一步；只能使用列表中出现过的坐标；任务完成立即用 done 收尾；"
+    "禁止操作登录/验证码/账号密码类元素（不要点击、不要输入）；"
     '可在 JSON 中加 "thought" 字段简述思路，但不要输出多余文字。'
 )
 
@@ -357,7 +359,8 @@ def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg
     state = {"task": task, "recent_steps": history[-4:],
              "screen_elements": [{"id": "elem_%d" % i, "text": l} for i, _, _, l, _ in elems]}
     target_instr = ("为完成 `task`，下一步应选哪个动作？答案必须从 `screen_elements` 或"
-                    "滑动/返回/完成中选择；若上一步做过同样动作且无效果，不要重复。")
+                    "滑动/返回/完成中选择；若上一步做过同样动作且无效果，不要重复。"
+                    "不要选择「登录/验证码/获取验证码/密码」类元素（系统安全规则禁止）。")
     exp_text = render_experience(experience)
     if exp_text:
         target_instr += "\n参考经验（上次同类任务的成功做法；若与当前屏幕相符，优先参考）：\n" + exp_text
@@ -484,13 +487,17 @@ def _bigrams(s):
 
 
 def load_experience(task, limit=2, min_score=0.2):
-    """从本地经验库检索与当前任务相似的历史成功轨迹（2-gram Jaccard 相似度）。"""
-    try:
-        with open(EXAMPLES_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return []
-    if not isinstance(data, list):
+    """从本地经验库检索与当前任务相似的历史轨迹（成功范例 + 失败教训）。"""
+    data = []
+    for path in (EXAMPLES_PATH, FAILURES_PATH):
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, list):
+                data.extend(d)
+        except Exception:
+            pass
+    if not data:
         return []
     tb = _bigrams(task)
     if not tb:
@@ -530,16 +537,44 @@ def save_experience(task, result, steps, engine):
 
 
 def render_experience(exps):
-    """经验列表 → 可注入 prompt 的文本。"""
+    """经验列表 → 可注入 prompt 的文本（成功范例 / 失败教训）。"""
     if not exps:
         return ""
     lines = []
     for i, ex in enumerate(exps, 1):
-        lines.append("%d) 上次「%s」的做法（%d 步，结果：%s）：" % (
-            i, ex.get("task", "")[:36], len(ex.get("steps") or []), (ex.get("result") or "")[:40]))
-        for s in (ex.get("steps") or [])[:12]:
-            lines.append("   %s" % s)
+        if ex.get("kind") == "failure":
+            lines.append("%d) 上次「%s」失败过（原因：%s）。以下做法当时没奏效，避免重复：" % (
+                i, ex.get("task", "")[:36], (ex.get("reason") or "未完成")[:30]))
+            for s in (ex.get("steps") or [])[:8]:
+                lines.append("   × %s" % s)
+        else:
+            lines.append("%d) 上次「%s」的做法（%d 步，结果：%s）：" % (
+                i, ex.get("task", "")[:36], len(ex.get("steps") or []), (ex.get("result") or "")[:40]))
+            for s in (ex.get("steps") or [])[:12]:
+                lines.append("   %s" % s)
     return "\n".join(lines)
+
+
+def save_failure(task, reason, steps):
+    """任务失败时保存教训（按任务文本去重置顶，上限 30 条），下次同类任务注入"别再做"。"""
+    if not task or not steps:
+        return
+    try:
+        os.makedirs(SKILLS_DIR, exist_ok=True)
+        try:
+            with open(FAILURES_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = []
+        if not isinstance(data, list):
+            data = []
+        data = [d for d in data if d.get("task") != task]
+        data.insert(0, {"task": task, "kind": "failure", "reason": (reason or "")[:80],
+                        "steps": steps[-12:], "ts": int(time.time())})
+        with open(FAILURES_PATH, "w", encoding="utf-8") as f:
+            json.dump(data[:30], f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
 
 
 def action_to_line(act):
@@ -632,13 +667,28 @@ def fake_tree_from_elems(elems):
     return {"children": children}
 
 
+# 登录/验证类敏感操作护栏（安全：agent 不处理登录凭证）
+LOGIN_WORDS = ("登录", "验证码", "密码", "注册账号", "一键登录")
+DANGER_WORDS = ("验证码", "密码")
+
+
+def label_at(elems, x, y, tol=70):
+    """返回屏幕坐标附近元素的文本（供安全护栏比对）"""
+    for e in elems:
+        if abs(e[1] - x) <= tol and abs(e[2] - y) <= tol:
+            return e[3]
+    return ""
+
+
 # ---------------------------------------------------------------- App 使用要点（经验卡雏形）
 APP_HINTS_BUILTIN = {
-    "com.sina.weibo": ("看热搜榜：点底部导航「发现」→ 页面上方就是热搜榜；若无，看搜索框下方「热搜」。"
+    "com.sina.weibo": ("看热搜榜：点底部导航「发现」（屏幕底部中部，坐标约 (540,2277)）。"
+                       "若底部中部显示的是「回到顶部」浮动按钮：先点它一次（页面滚回顶部后它会消失），"
+                       "然后再点「发现」。进入后发现页上方即是热搜榜。"
                        "底部导航（左→右）：首页 / 视频 / 发现 / 消息 / 我。"),
     "com.android.settings": "设置项都在首屏列表；找不到就向下滑动。电池电量：设置 → 电池。",
     "com.coloros.weather2": "打开即见当前温度与天气；未来几天预报向下滑动。",
-    "com.tencent.mm": "底部导航（左→右）：微信 / 通讯录 / 发现 / 我。",
+    "com.tencent.mm": "底部导航（左→右）：微信 / 通讯录 / 发现 / 我。若显示登录页则无法查看消息。",
 }
 _APP_HINTS = None
 
@@ -916,6 +966,7 @@ def main():
     block_streak = 0   # 连续被系统拒绝的次数
     done_rejects = 0   # done 被防幻觉复核驳回的次数（上限 2）
     scroll_streak = 0  # 连续滚动/滑动次数（迷路检测：≥6 次强制升级）
+    login_warned = False  # 登录页提示只发一次
 
     print("[agent] task: %s" % task)
     print("[agent] mode: %s | start engine: %s | upgrade-after: %d | max-steps: %d" %
@@ -1000,6 +1051,20 @@ def main():
                             "（系统提醒）请先仔细看当前屏幕：任务要求的信息（名称/数值/列表等）"
                             "是否已经出现？如果已经能看到，请立即输出 done，并在 summary 里给出答案；"
                             "如果没有，再继续操作。"})
+        # —— 登录页检测：只提醒不登录（安全护栏另见执行处） ——
+        if not login_warned and step >= 3:
+            try:
+                hit = sum(1 for e in elems if any(w in e[3] for w in LOGIN_WORDS))
+                if hit >= 3:
+                    login_warned = True
+                    print("[step %d] 检测到登录页（%d 个登录关键词）" % (step, hit))
+                    tracer.log(step, "result", "登录页检测：不执行登录操作")
+                    history.append({"role": "user", "content":
+                                    "（系统检测）当前界面似乎是登录/验证页。请不要尝试登录、获取验证码或"
+                                    "输入账号密码；如果任务需要登录才能继续，请直接输出 done，并在 summary 中"
+                                    "说明「无法完成：需要先登录」。"})
+            except Exception:
+                pass
         try:
             act, eng, dec_dt, ti = decide(step, task, state, history, engine_now, elems,
                                           experience, related_apps)
@@ -1068,7 +1133,14 @@ def main():
         else:
             try:
                 if a == "tap":
-                    portal.tap(act["x"], act["y"])
+                    tgt = act.get("pick") or label_at(elems, act.get("x", -1), act.get("y", -1))
+                    if tgt and any(w in tgt for w in DANGER_WORDS):
+                        ok = False
+                        exec_err = ("安全护栏：不执行「%s」类操作（agent 不处理登录/验证码凭证）" % tgt)
+                        print("[step %d] 护栏拦截: %s" % (step, tgt))
+                        tracer.log(step, "result", "护栏拦截: %s" % tgt)
+                    else:
+                        portal.tap(act["x"], act["y"])
                 elif a == "swipe":
                     portal.swipe(act.get("x1", 0), act.get("y1", 0), act.get("x2", 0),
                                  act.get("y2", 0), act.get("duration", 500))
@@ -1162,10 +1234,16 @@ def main():
         time.sleep(0.8)
 
     print("[agent] engine-usage: jev=%d qwen=%d" % (usage["jev"], usage["qwen"]))
+    fail_reason = ""
     if aborted:
+        fail_reason = "portal 不可用（中止）"
         print("[agent] FAILED: portal unreachable (aborted).")
     else:
+        fail_reason = "步数用尽（%d 步未完成）" % max_steps
         print("[agent] max steps (%d) reached, no done." % max_steps)
+    if exec_log:
+        save_failure(task, fail_reason, exec_log)
+        print("[agent] 失败教训已记录: %d 步 → ~/bridge/skills/failures.json" % len(exec_log))
     tracer.close()
     return 2
 

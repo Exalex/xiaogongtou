@@ -600,6 +600,25 @@ public class EntryA11yService extends AccessibilityService {
                     boolean running = "running".equals(state);
                     if (running) {
                         sleepMs = 2000;
+                        // 运行中：更新通知（第 N 步 + 最新动作）
+                        try {
+                            int stepNo = st.optInt("step", 0);
+                            String latest = "";
+                            org.json.JSONArray ls = st.optJSONArray("lines");
+                            if (ls != null) {
+                                for (int i = ls.length() - 1; i >= 0; i--) {
+                                    String s = ls.optString(i, "").trim();
+                                    if (s.startsWith("[step ")) {
+                                        latest = s;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (stepNo > 0) {
+                                Notifier.updateRunning(app, task, stepNo, latest);
+                            }
+                        } catch (Exception ignored) {
+                        }
                     }
 
                     if (prevState != null) {
