@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">小工头</string>
+    <string name="a11y_label">小工头 · 悬浮球与快捷唤起</string>
+    <string name="a11y_desc">提供全局悬浮球、快捷输入面板，并辅助点击输入法键盘上的语音键。不采集、不上传任何内容。</string>
+</resources>

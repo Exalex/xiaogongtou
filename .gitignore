@@ -1,0 +1,18 @@
+# 本地敏感信息（不进 git）
+entry/local_secrets.json
+
+# 构建产物
+entry/build/
+entry/dist/
+
+# 运行产物与截图（可能含个人屏幕内容）
+logs/
+apk/
+
+# 内部工作目录（记忆/会话）
+.workbuddy/
+
+# Python
+__pycache__/
+*.pyc
+*.trace.jsonl

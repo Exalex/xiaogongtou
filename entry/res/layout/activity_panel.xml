@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#99020805">
+
+    <FrameLayout
+        android:id="@+id/glowWrap"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_marginStart="14dp"
+        android:layout_marginEnd="14dp"
+        android:background="@drawable/glow_ring"
+        android:padding="1dp">
+
+        <LinearLayout
+            android:id="@+id/card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/panel_card_bg"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <View
+                    android:id="@+id/pulseDot"
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:background="@drawable/dot_glow" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:letterSpacing="0.08"
+                    android:text="小工头 · AI 直达"
+                    android:textColor="#E8F1ED"
+                    android:textSize="13sp" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/hotkeyHint"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="VOL▾ 唤起 · 再按执行"
+                    android:textColor="#5F7A70"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <EditText
+                android:id="@+id/taskInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/input_bg"
+                android:gravity="top"
+                android:hint="说一句，让它去干…"
+                android:imeOptions="actionSend"
+                android:inputType="textMultiLine|textCapSentences"
+                android:maxLines="5"
+                android:minLines="2"
+                android:padding="12dp"
+                android:textColor="#EAF5F0"
+                android:textColorHint="#5F7A70"
+                android:textSize="16sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/modeAuto"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/chip_bg"
+                    android:paddingStart="13dp"
+                    android:paddingTop="7dp"
+                    android:paddingEnd="13dp"
+                    android:paddingBottom="7dp"
+                    android:text="智能"
+                    android:textColor="#9FE1CB"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/modeJev"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/chip_bg"
+                    android:paddingStart="13dp"
+                    android:paddingTop="7dp"
+                    android:paddingEnd="13dp"
+                    android:paddingBottom="7dp"
+                    android:text="极速"
+                    android:textColor="#9FE1CB"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/modeQwen"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/chip_bg"
+                    android:paddingStart="13dp"
+                    android:paddingTop="7dp"
+                    android:paddingEnd="13dp"
+                    android:paddingBottom="7dp"
+                    android:text="深度"
+                    android:textColor="#9FE1CB"
+                    android:textSize="13sp" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/btnMic"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/chip_bg"
+                    android:paddingStart="14dp"
+                    android:paddingTop="9dp"
+                    android:paddingEnd="14dp"
+                    android:paddingBottom="9dp"
+                    android:text="说话"
+                    android:textColor="#9FE1CB"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/btnSend"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/send_bg"
+                    android:elevation="4dp"
+                    android:paddingStart="20dp"
+                    android:paddingTop="9dp"
+                    android:paddingEnd="20dp"
+                    android:paddingBottom="9dp"
+                    android:text="执行"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/hintLine"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="#6E8F84"
+                android:textSize="11sp"
+                android:visibility="gone" />
+        </LinearLayout>
+    </FrameLayout>
+</FrameLayout>

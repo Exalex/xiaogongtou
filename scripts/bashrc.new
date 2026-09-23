@@ -1,0 +1,8 @@
+
+# mini_console auto-start (idempotent): 打开 Termux 时若控制台不在线则兜底拉起
+# 正常情况下控制台以 root 身份常驻（免疫系统冻结），此处仅在它离线时兜底。
+if ! python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/api/status', timeout=2)" >/dev/null 2>&1; then
+  if ! pgrep -f mini_console.py >/dev/null 2>&1; then
+    python3 -c "import subprocess,os; h=os.path.expanduser('~'); l=open(h+'/bridge/out/console.log','ab'); p=subprocess.Popen(['python3',h+'/mini_console.py'],stdout=l,stderr=l,stdin=subprocess.DEVNULL,start_new_session=True)"
+  fi
+fi
