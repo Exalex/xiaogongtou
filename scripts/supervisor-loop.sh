@@ -25,6 +25,16 @@ while true; do
     fi
     sleep 6
   fi
+  # ---- xgt-bridge（root 桥：树导出 + input 容灾）守护 ----
+  if ! pgrep -f "xgt[-]bridge.sh" >/dev/null 2>&1; then
+    echo "[$(date)] xgt-bridge down -> restarting" >> $LOG
+    if command -v setsid >/dev/null 2>&1; then
+      setsid sh /data/adb/mobilerun-console/xgt-bridge.sh </dev/null >/dev/null 2>&1 &
+    else
+      sh /data/adb/mobilerun-console/xgt-bridge.sh </dev/null >/dev/null 2>&1 &
+    fi
+    sleep 2
+  fi
   # ---- 每 5 轮（≈5 分钟）检查 ----
   i=$((i+1))
   if [ $((i % 5)) -eq 0 ]; then
