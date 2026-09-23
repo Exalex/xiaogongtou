@@ -26,6 +26,9 @@ public class EntryA11yService extends AccessibilityService {
     private FloatingBall ball;
     private Poller poller;
     private DebugOverlay dbg;
+    private volatile boolean treeLoopAlive = false;
+    private volatile String lastTreeSeq = "";
+    private java.io.File treeDir;
 
     /** 音量键快捷键（默认开）：按一下唤起面板，再按一下执行；长按则由本服务模拟"降低音量" */
     private volatile boolean hotkeyOn = true;
@@ -79,6 +82,11 @@ public class EntryA11yService extends AccessibilityService {
             poller.start();
         } catch (Exception e) {
             Log.w(TAG, "poller failed", e);
+        }
+        try {
+            startTreeExporter();
+        } catch (Exception e) {
+            Log.w(TAG, "tree exporter failed", e);
         }
     }
 
@@ -403,6 +411,7 @@ public class EntryA11yService extends AccessibilityService {
             volHandler.removeCallbacksAndMessages(null);
         } catch (Exception ignored) {
         }
+        treeLoopAlive = false;
     }
 
     /** 调试浮窗同步：debug 开关（控制台设置）打开时显示并刷新执行链路；关闭时隐藏 */
@@ -421,6 +430,133 @@ public class EntryA11yService extends AccessibilityService {
             dbg.poll(rid);
         } else if (dbg != null) {
             dbg.hide();
+        }
+    }
+
+    /** ============ 树导出：供 Termux 侧 agent 经 root 桥按需拉取（替代 uiautomator，避免其副作用） ============ */
+    private void startTreeExporter() {
+        java.io.File d = getExternalFilesDir(null);
+        if (d == null) {
+            Log.w(TAG, "tree exporter: no external dir");
+            return;
+        }
+        treeDir = d;
+        treeLoopAlive = true;
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (!treeLoopAlive) {
+                    return;
+                }
+                try {
+                    exportTreeIfRequested();
+                } catch (Exception ignored) {
+                }
+                h.postDelayed(this, 250);
+            }
+        }, 250);
+    }
+
+    private void exportTreeIfRequested() {
+        if (treeDir == null) {
+            return;
+        }
+        java.io.File reqF = new java.io.File(treeDir, "tree_req");
+        if (!reqF.exists()) {
+            return;
+        }
+        String seq = readTextFile(reqF);
+        if (seq == null) {
+            return;
+        }
+        seq = seq.trim();
+        if (seq.isEmpty() || seq.equals(lastTreeSeq)) {
+            return;
+        }
+        String json = buildTreeJson(seq);
+        if (json != null) {
+            writeTextFile(new java.io.File(treeDir, "tree.json"), json);
+            lastTreeSeq = seq;
+        }
+    }
+
+    private String buildTreeJson(String seq) {
+        try {
+            org.json.JSONArray arr = new org.json.JSONArray();
+            java.util.List<android.view.accessibility.AccessibilityWindowInfo> ws = getWindows();
+            int idx = 0;
+            if (ws != null) {
+                for (android.view.accessibility.AccessibilityWindowInfo w : ws) {
+                    int type = w.getType();
+                    if (type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                            || type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+                            || type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM) {
+                        android.view.accessibility.AccessibilityNodeInfo root = w.getRoot();
+                        if (root != null) {
+                            idx = collectNodes(root, arr, idx, 0);
+                        }
+                    }
+                }
+            }
+            org.json.JSONObject out = new org.json.JSONObject();
+            out.put("seq", seq);
+            out.put("ts", System.currentTimeMillis());
+            out.put("elems", arr);
+            return out.toString();
+        } catch (Exception e) {
+            Log.w(TAG, "buildTreeJson failed", e);
+            return null;
+        }
+    }
+
+    private int collectNodes(android.view.accessibility.AccessibilityNodeInfo n,
+                             org.json.JSONArray arr, int idx, int depth) {
+        if (n == null || depth > 20 || idx >= 400) {
+            return idx;
+        }
+        try {
+            String t = n.getText() == null ? "" : n.getText().toString().trim();
+            String d = n.getContentDescription() == null ? "" : n.getContentDescription().toString().trim();
+            String label = !t.isEmpty() ? t : d;
+            if (!label.isEmpty()) {
+                android.graphics.Rect b = new android.graphics.Rect();
+                n.getBoundsInScreen(b);
+                if (b.width() > 0 && b.height() > 0) {
+                    boolean clk = n.isClickable() || n.isLongClickable();
+                    org.json.JSONArray one = new org.json.JSONArray();
+                    one.put(idx);
+                    one.put(b.centerX());
+                    one.put(b.centerY());
+                    one.put(label.length() > 50 ? label.substring(0, 50) : label);
+                    one.put(clk);
+                    arr.put(one);
+                    idx++;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        int cnt = n.getChildCount();
+        for (int i = 0; i < cnt && idx < 400; i++) {
+            idx = collectNodes(n.getChild(i), arr, idx, depth + 1);
+        }
+        return idx;
+    }
+
+    private static String readTextFile(java.io.File f) {
+        try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+            byte[] buf = new byte[(int) Math.min(f.length(), 4096)];
+            int n = in.read(buf);
+            return n > 0 ? new String(buf, 0, n, "UTF-8") : "";
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static void writeTextFile(java.io.File f, String s) {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(f)) {
+            out.write(s.getBytes("UTF-8"));
+        } catch (Exception ignored) {
         }
     }
 

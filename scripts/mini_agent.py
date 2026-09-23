@@ -120,22 +120,46 @@ class Portal:
         raise RuntimeError("bad screenshot response")
 
     def tap(self, x, y):
-        self._unwrap(self._req("/tap", "POST", {"x": int(x), "y": int(y)}))
+        try:
+            self._unwrap(self._req("/tap", "POST", {"x": int(x), "y": int(y)}))
+        except Exception as e:
+            r = bridge_cmd("tap %d %d" % (int(x), int(y)))
+            if not r.startswith("ok"):
+                raise RuntimeError("tap 双通道失败: %r / %s" % (e, r))
+            print("[portal] tap 经 root 桥完成 (%s,%s)" % (x, y))
 
     def swipe(self, x1, y1, x2, y2, duration=500):
-        self._unwrap(self._req("/swipe", "POST", {
-            "startX": int(x1), "startY": int(y1),
-            "endX": int(x2), "endY": int(y2), "duration": float(duration)}))
+        try:
+            self._unwrap(self._req("/swipe", "POST", {
+                "startX": int(x1), "startY": int(y1),
+                "endX": int(x2), "endY": int(y2), "duration": float(duration)}))
+        except Exception as e:
+            r = bridge_cmd("swipe %d %d %d %d %d" % (int(x1), int(y1), int(x2), int(y2), int(duration)))
+            if not r.startswith("ok"):
+                raise RuntimeError("swipe 双通道失败: %r / %s" % (e, r))
+            print("[portal] swipe 经 root 桥完成")
 
     def input_text(self, text, clear=False):
         b64 = base64.b64encode(text.encode()).decode()
         self._unwrap(self._req("/keyboard/input", "POST", {"base64_text": b64, "clear": clear}))
 
     def key(self, code):
-        self._unwrap(self._req("/keyboard/key", "POST", {"key_code": int(code)}))
+        try:
+            self._unwrap(self._req("/keyboard/key", "POST", {"key_code": int(code)}))
+        except Exception as e:
+            r = bridge_cmd("key %d" % int(code))
+            if not r.startswith("ok"):
+                raise RuntimeError("key 双通道失败: %r / %s" % (e, r))
+            print("[portal] key 经 root 桥完成")
 
     def open_app(self, package):
-        self._unwrap(self._req("/app", "POST", {"package": package}))
+        try:
+            self._unwrap(self._req("/app", "POST", {"package": package}))
+        except Exception as e:
+            r = bridge_cmd("open %s" % package)
+            if not r.startswith("ok"):
+                raise RuntimeError("open_app 双通道失败: %r / %s" % (e, r))
+            print("[portal] open_app 经 root 桥完成: %s" % package)
 
     def get_apps(self):
         """已安装应用列表 [{packageName, label, ...}]"""
@@ -540,6 +564,74 @@ def action_to_line(act):
 
 
 # ---------------------------------------------------------------- 应用名解析（治"包名幻觉"）
+def bridge_cmd(cmd, timeout=8.0):
+    """经 root 桥（xgt-bridge.sh）执行命令：返回 "ok" 或 "err:..."。
+    协议：写 ~/bridge/.xgt_req（"<seq> <cmd>"）→ 桥执行 → 读 ~/bridge/.xgt_res。"""
+    req = os.path.expanduser("~/bridge/.xgt_req")
+    res = os.path.expanduser("~/bridge/.xgt_res")
+    seq = "c%d" % int(time.time() * 1000)
+    try:
+        try:
+            os.remove(res)
+        except OSError:
+            pass
+        with open(req, "w", encoding="utf-8") as f:
+            f.write("%s %s" % (seq, cmd))
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                with open(res, encoding="utf-8") as f:
+                    return (f.read() or "").strip()
+            except OSError:
+                time.sleep(0.05)
+        return "err: bridge timeout"
+    except Exception as e:
+        return "err: %r" % (e,)
+
+
+def bridge_elements(timeout=8.0):
+    """经 root 桥 + 小工头 App 取完整 a11y 树（含"不重要"视图，如微博信息流）。
+    替代 uiautomator：实测 uiautomator dump 会触发系统解绑 portal 的 a11y 服务。"""
+    out = os.path.expanduser("~/bridge/.tree.json")
+    try:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        r = bridge_cmd("tree", timeout=timeout)
+        if not r.startswith("ok"):
+            print("[agent] 桥取树失败: %s" % r)
+            return []
+        with open(out, encoding="utf-8", errors="replace") as f:
+            d = json.load(f)
+        raw = []
+        for e in d.get("elems") or []:
+            try:
+                raw.append((0, int(e[1]), int(e[2]), str(e[3]), bool(e[4])))
+            except Exception:
+                continue
+        if len(raw) < 3:
+            return []
+        # 限流：可点优先（80）+ 文本（40）
+        clicks = [e for e in raw if e[4]][:80]
+        texts = [e for e in raw if not e[4] and len(e[3]) >= 2][:40]
+        merged = clicks + texts
+        return [(i, e[1], e[2], e[3], e[4]) for i, e in enumerate(merged)]
+    except Exception as e:
+        print("[agent] 桥取树失败: %r" % (e,))
+        return []
+
+
+def fake_tree_from_elems(elems):
+    """把元素列表合成一棵最小 a11y_tree（供 render_tree 渲染给 qwen，portal 离线时用）"""
+    children = []
+    for _, cx, cy, label, clk in elems:
+        children.append({"text": label, "className": "", "isClickable": clk,
+                         "boundsInScreen": {"left": cx - 1, "top": cy - 1,
+                                            "right": cx + 1, "bottom": cy + 1}})
+    return {"children": children}
+
+
 # ---------------------------------------------------------------- App 使用要点（经验卡雏形）
 APP_HINTS_BUILTIN = {
     "com.sina.weibo": ("看热搜榜：点底部导航「发现」→ 页面上方就是热搜榜；若无，看搜索框下方「热搜」。"
@@ -564,6 +656,26 @@ def app_hints():
         except Exception:
             pass
     return _APP_HINTS
+
+
+# 内容区常被 a11y 过滤的 App（即使 portal 元素数不低，也强制 uiautomator 补盲）
+BLIND_APPS_BUILTIN = {"com.sina.weibo"}
+_BLIND_APPS = None
+
+
+def blind_apps():
+    """需要强制感知补盲的 App 集合 = 内置 + ~/bridge/skills/blind_apps.json（list）"""
+    global _BLIND_APPS
+    if _BLIND_APPS is None:
+        _BLIND_APPS = set(BLIND_APPS_BUILTIN)
+        try:
+            with open(os.path.expanduser("~/bridge/skills/blind_apps.json"), encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, list):
+                _BLIND_APPS.update(str(x) for x in d)
+        except Exception:
+            pass
+    return _BLIND_APPS
 
 
 def resolve_package(want, apps):
@@ -803,6 +915,7 @@ def main():
     last_sig, last_ok, last_hash = None, None, None
     block_streak = 0   # 连续被系统拒绝的次数
     done_rejects = 0   # done 被防幻觉复核驳回的次数（上限 2）
+    scroll_streak = 0  # 连续滚动/滑动次数（迷路检测：≥6 次强制升级）
 
     print("[agent] task: %s" % task)
     print("[agent] mode: %s | start engine: %s | upgrade-after: %d | max-steps: %d" %
@@ -833,19 +946,37 @@ def main():
             except Exception as e:
                 print("[step %d] portal state error (%d/3): %r" % (step, attempt + 1, e))
                 time.sleep(1.5)
+        pre_elems = None
         if state is None:
-            print("[agent] portal 连续取状态失败（窗口切换/系统弹窗？），中止。")
-            aborted = True
-            break
+            # portal 不可用 → 用 root 桥树顶上（操作侧由 Portal 的桥兜底接续）
+            pre_elems = bridge_elements()
+            if pre_elems:
+                print("[step %d] portal 不可用，转用 root 桥树（%d 元素）" % (step, len(pre_elems)))
+                tracer.log(step, "result", "portal离线→桥树 %d 元素" % len(pre_elems))
+                state = {"phone_state": {"currentApp": "(桥)", "packageName": "",
+                                         "keyboardVisible": False},
+                         "a11y_tree": fake_tree_from_elems(pre_elems)}
+            else:
+                print("[agent] portal 连续取状态失败且桥树也不可用，中止。")
+                aborted = True
+                break
         elems = collect_elements(state)
-        # —— 感知补盲：portal 树元素过少（内容区被标记"不重要"被过滤）→ 用 uiautomator 完整树 ——
-        if len(elems) < 8:
-            extra = uiauto_elements()
-            if len(extra) > len(elems):
-                print("[step %d] 感知补盲: portal %d -> uiautomator %d 元素"
-                      % (step, len(elems), len(extra)))
-                tracer.log(step, "result", "感知补盲 %d->%d 元素" % (len(elems), len(extra)))
-                elems = extra
+        if pre_elems is not None:
+            elems = pre_elems
+        else:
+            # —— 感知补盲：portal 树元素过少（内容区被标记"不重要"被过滤）→ 用 root 桥完整树 ——
+            cur_pkg = ""
+            try:
+                cur_pkg = (state.get("phone_state") or {}).get("packageName") or ""
+            except Exception:
+                pass
+            if len(elems) < 8 or cur_pkg in blind_apps():
+                extra = bridge_elements()
+                if len(extra) > len(elems):
+                    print("[step %d] 感知补盲: portal %d -> 桥树 %d 元素"
+                          % (step, len(elems), len(extra)))
+                    tracer.log(step, "result", "感知补盲 %d->%d 元素" % (len(elems), len(extra)))
+                    elems = extra
         screen_hash = hash(tuple((e[3][:24], e[1] // 16, e[2] // 16) for e in elems))
 
         # —— 上一步效果补记：用本步屏幕对比上一步执行后的变化，回传给模型（治"点了没反应还在点"） ——
@@ -980,6 +1111,11 @@ def main():
                 fail_counts[sig] = fail_counts.get(sig, 0) + 1
         # 记录本步，供下一步"效果补记"（屏幕变化对比）
         last_sig, last_ok, last_hash = sig, ok, screen_hash
+        # 迷路检测：连续滚动/滑动计数（滚动会改变屏幕哈希，不会触发常规"无进展"）
+        if a in ("scroll", "swipe"):
+            scroll_streak += 1
+        else:
+            scroll_streak = 0
 
         tracer.log(step, "result", ("ok: " if ok else "FAIL: ") + action_to_line(act),
                    ok=ok, ms=int((time.time() - t_step) * 1000), blocked=blocked)
@@ -1010,14 +1146,18 @@ def main():
             print("[step %d] signals: %s (无进展 x%d/%d)" %
                   (step, ",".join(flags), prog.score, upgrade_after))
 
-        if mode == "auto" and engine_now == "jev" and prog.score >= upgrade_after:
-            print("[switch] 连续无进展 x%d（%s）→ qwen 接管（从第 %d 步起）" %
-                  (prog.score, ",".join(flags) if flags else "-", step + 1))
+        if mode == "auto" and engine_now == "jev" and (prog.score >= upgrade_after
+                                                       or scroll_streak >= 6):
+            print("[switch] %s → qwen 接管（从第 %d 步起）" %
+                  ("连续无进展 x%d（%s）" % (prog.score, ",".join(flags) if flags else "-")
+                   if prog.score >= upgrade_after else "连续滚动 %d 次（迷路）" % scroll_streak,
+                   step + 1))
             engine_now = "qwen"
             prog.score = 0
+            scroll_streak = 0
             history.append({"role": "user", "content":
-                            "快速引擎连续多步无进展（重复动作/屏幕无变化）。现在由更强的模型接管："
-                            "请根据当前屏幕与任务重新规划，避免重复此前无效动作。"
+                            "快速引擎连续多步无进展（重复动作/屏幕无变化/连续滚动找不到目标）。"
+                            "现在由更强的模型接管：请根据当前屏幕与任务重新规划，避免重复此前无效动作。"
                             "若屏幕上已有任务所需的信息，请直接输出 done 并给出答案。"})
         time.sleep(0.8)
 

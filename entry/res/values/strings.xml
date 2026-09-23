@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">小工头</string>
     <string name="a11y_label">小工头 · 悬浮球与快捷唤起</string>
-    <string name="a11y_desc">提供全局悬浮球、快捷输入面板，并辅助点击输入法键盘上的语音键。不采集、不上传任何内容。</string>
+    <string name="a11y_desc">提供全局悬浮球、快捷输入与键盘语音键辅助；并允许本机自动化 Agent（经 root 桥）按需读取屏幕结构以执行你派发的任务。数据仅在本机流转，不采集、不上传。</string>
 </resources>
