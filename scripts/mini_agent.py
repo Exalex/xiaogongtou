@@ -707,6 +707,19 @@ def save_experience(task, result, steps, engine):
                         "steps": cleaned[-20:], "ts": int(time.time())})
         with open(EXAMPLES_PATH, "w", encoding="utf-8") as f:
             json.dump(data[:50], f, ensure_ascii=False, indent=1)
+        # 任务已成功 → 从错题本移除同类任务（避免"成功经验 + 失败教训"同时注入的矛盾）
+        try:
+            if os.path.exists(FAILURES_PATH):
+                with open(FAILURES_PATH, encoding="utf-8") as f:
+                    fails = json.load(f)
+                if isinstance(fails, list):
+                    kept = [x for x in fails if x.get("task") != task]
+                    if len(kept) != len(fails):
+                        with open(FAILURES_PATH, "w", encoding="utf-8") as f:
+                            json.dump(kept, f, ensure_ascii=False, indent=1)
+                        print("[agent] 错题本已清理同类任务（%s）" % task[:30])
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -931,7 +944,7 @@ APP_HINTS_BUILTIN = {
                  "底部导航（左→右）：首页 / 视频 / 发现 / 消息 / 我。"),
         "spots": [
             ["更多热搜(发现页热搜卡片右下角)", 907, 846, ["更多热搜", "热搜简报"]],
-            ["热搜排行标签(顶部标签栏第2个)", 267, 624, ["文娱", "实时热点", "热搜雷达"]],
+            ["热搜排行标签(顶部标签栏第2个)", 267, 624, ["热搜雷达"]],
         ],
     },
     "com.android.settings": "设置项都在首屏列表；找不到就向下滑动。电池电量：设置 → 电池。",
