@@ -581,6 +581,54 @@ def save_failure(task, reason, steps):
         pass
 
 
+def learn_app_hint(task, exec_log, state):
+    """任务成功后：qwen 归纳一条「App 使用要点」写入 ~/bridge/skills/apps.json（自我进化）。
+    下次同类任务会作为捷径提示注入 Jev/qwen。"""
+    try:
+        if not task or not exec_log:
+            return
+        steps_text = " → ".join(exec_log[-10:])
+        pk = ""
+        m = re.search(r"open_app\(([\w.]+)\)", steps_text)
+        if m:
+            pk = m.group(1)
+        if not pk:
+            try:
+                pk = (state.get("phone_state") or {}).get("packageName") or ""
+            except Exception:
+                pk = ""
+        if not pk:
+            return
+        prompt = ("任务「%s」在 App（%s）上成功完成，执行步骤：%s\n"
+                  "请总结一条「App 使用要点」（30 字内、可给下一次同类任务当捷径提示），"
+                  "只输出 JSON：{\"hint\": \"...\"}" % (task[:80], pk, steps_text[:500]))
+        reply = call_llm([{"role": "user", "content": prompt}])
+        t = re.sub(r"<think[^>]*>.*?</think[^>]*>", " ", reply, flags=re.S)
+        m2 = re.search(r"\{[^{}]*\}", t, re.S)
+        if not m2:
+            return
+        hint = str(json.loads(m2.group(0)).get("hint", "")).strip()
+        if len(hint) < 6:
+            return
+        path = os.path.expanduser("~/bridge/skills/apps.json")
+        data = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                data = d
+        except Exception:
+            pass
+        old = str(data.get(pk, ""))
+        if hint not in old:
+            data[pk] = ((old + " " + hint).strip() if old else hint)[:300]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        print("[agent] App 要点已更新: %s -> %s" % (pk, hint[:60]))
+    except Exception as e:
+        print("[agent] App 要点归纳失败: %r" % (e,))
+
+
 def action_to_line(act):
     """动作 → 人可读单行（经验库 / 调试窗共用）。"""
     a = act.get("action")
@@ -1124,6 +1172,10 @@ def main():
             if exec_log:
                 save_experience(task, summary, exec_log, mode)
                 print("[agent] 经验已保存: %d 步 → ~/bridge/skills/examples.json" % len(exec_log))
+                try:
+                    learn_app_hint(task, exec_log, state)
+                except Exception:
+                    pass
             return 0
 
         # —— 重复失败/无效动作硬阻断（连续失败 ≥2 或连续无效果 ≥2 → 拒绝执行，逼模型换策略） ——
