@@ -38,6 +38,18 @@ while true; do
   # ---- 每 5 轮（≈5 分钟）检查 ----
   i=$((i+1))
   if [ $((i % 5)) -eq 0 ]; then
+    # 4) 入口 App 进程看护：进程死了（系统清理/o-stop）→ 靠 a11y 服务 toggle 拉起
+    #    （a11y 服务在启用列表里 ≠ 进程活着；桥树/浮球/通知都依赖该进程）
+    if ! pidof com.xiaogongtou.entry >/dev/null 2>&1; then
+      echo "[$(date)] entry app process down -> a11y toggle to revive" >> $LOG
+      CUR2=$(settings get secure enabled_accessibility_services)
+      settings put secure enabled_accessibility_services "$PORTAL_SVC"
+      sleep 1
+      settings put secure enabled_accessibility_services "$CUR2"
+      settings put secure accessibility_enabled 1
+      sleep 4
+      echo "[$(date)] entry revive done (pid=$(pidof com.xiaogongtou.entry))" >> $LOG
+    fi
     # 3) 入口 App 的 a11y 服务补回
     ENTRY_OK=$(settings get secure enabled_accessibility_services | grep -c "xiaogongtou")
     if [ "$ENTRY_OK" = "0" ]; then

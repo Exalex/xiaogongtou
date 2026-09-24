@@ -271,16 +271,17 @@ def read_out(rid, max_bytes=20000):
 def parse_run(lines):
     info = {"engine": None, "step": 0, "result": None, "failed_reason": None,
             "switches": [], "usage": None}
-    for ln in lines:
+    done_idx = None
+    for idx, ln in enumerate(lines):
         m = re.search(r"\[step (\d+)\] (\w+) ([\d.]+)s", ln)
         if m:
             info["step"] = int(m.group(1))
             info["engine"] = m.group(2)
         if "[switch]" in ln:
             info["switches"].append(ln.strip())
-        m = re.search(r"\[agent\] DONE: (.*)", ln)
-        if m:
-            info["result"] = m.group(1).strip()
+        if "[agent] DONE:" in ln:
+            done_idx = idx
+            info["result"] = ln.split("[agent] DONE:", 1)[1].strip()
         if "max steps" in ln:
             info["failed_reason"] = "步数用尽"
         if "[agent] FAILED:" in ln:
@@ -292,6 +293,16 @@ def parse_run(lines):
         m = re.search(r"\[agent\] engine-usage: (.*)", ln)
         if m:
             info["usage"] = m.group(1).strip()
+    # 多行答案收集：DONE 行之后、直到下一个日志标记（'[' 开头）或空行为止
+    # （答案常为编号列表，多行；此前只取首行导致通知/历史显示不全）
+    if done_idx is not None:
+        buf = [info["result"] or ""]
+        for ln in lines[done_idx + 1:]:
+            s = ln.rstrip()
+            if not s.strip() or s.lstrip().startswith("["):
+                break
+            buf.append(s)
+        info["result"] = "\n".join(x for x in buf if x.strip())
     return info
 
 

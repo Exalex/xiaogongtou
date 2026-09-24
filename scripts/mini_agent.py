@@ -71,6 +71,8 @@ SYSTEM_PROMPT = (
     "规则：一次只做一步；只能使用列表中出现过的坐标；任务完成立即用 done 收尾；"
     "done 的 summary 必须包含实际查到的具体内容（如新闻标题/名称/数值），"
     "不要只说「已找到/包含多条」等空话；"
+    "搜索/输入类任务：先 tap 点击搜索框或输入框，等键盘弹出后用 input_text 输入关键词，"
+    "再按 ENTER(key_code 66) 或点击「搜索」按钮提交，最后读取搜索结果；"
     "禁止操作登录/验证码/账号密码类元素（不要点击、不要输入）；"
     '可在 JSON 中加 "thought" 字段简述思路，但不要输出多余文字。'
 )
@@ -445,24 +447,56 @@ def wants_multi_answer(task, plan):
     return any(MULTI_ANSWER_RE.search(t) for t in texts)
 
 
-def render_rank_items(elems):
-    """从屏幕元素提取「官方排名候选」：标题 + 同一行（y 接近）的热度数值，按数值降序。
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn2int(s):
+    if s.isdigit():
+        return int(s)
+    if s == "十":
+        return 10
+    if "十" in s:
+        a, _, b = s.partition("十")
+        return (_CN_NUM.get(a, 1) if a else 1) * 10 + (_CN_NUM.get(b, 0) if b else 0)
+    return _CN_NUM.get(s, 0)
+
+
+def parse_rank_n(text):
+    """从任务文本解析"第N条/前N名"的 N（1-99），无则返回 0。"""
+    t = text or ""
+    m = re.search(r"第\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[条名位个]", t)
+    if not m:
+        m = re.search(r"前\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[条名位个]?", t)
+    if not m:
+        return 0
+    n = _cn2int(m.group(1))
+    return n if 1 <= n <= 99 else 0
+
+
+def rank_nth(acc, n):
+    """从累积榜单（title->热度）取第 n 名（热度降序）的标题。"""
+    if len(acc) < n:
+        return ""
+    items = sorted(acc.items(), key=lambda kv: -kv[1])
+    return items[n - 1][0]
+
+
+def extract_rank_pairs(elems):
+    """从屏幕元素提取「标题 + 同一行热度数值」对 → [(score, title), ...]（未排序）。
     背景：微博热搜等榜单的「1/2/3」序号与「置顶」标记是自绘图形、不在无障碍数据里，
-    只能靠「热度值降序」推断官方名次（置顶/推广条目无热度值 → 自动被排除）。
-    返回可直接注入 prompt 的文本；非榜单页面返回空串。"""
+    只能靠「热度值」推断官方名次（置顶/推广条目无热度值 → 自动被排除）。"""
     nums = []
     for e in elems:
         s = str(e[3]).strip()
         m = re.search(r"\d{4,}", s)
         if m:
             digits = re.sub(r"\D", "", s)
-            # 数字元素判定：数字占比高（如 "1090896"、"剧集 579667"、"623773 [金牌]"）
             if len(digits) >= 5 and len(digits) >= len(s) * 0.45:
-                nums.append((e[2], e[1], int(m.group(0)), s))
+                nums.append((e[2], e[1], int(m.group(0))))
     if len(nums) < 3:
-        return ""
+        return []
     out = []
-    for (ny, nx, score, _raw) in nums:
+    for (ny, nx, score) in nums:
         best = None
         for e in elems:
             if not str(e[3]).strip():
@@ -474,17 +508,24 @@ def render_rank_items(elems):
                     best = (e[2], str(e[3]).strip())
         if best:
             out.append((score, best[1]))
-    if len(out) < 3:
+    return out
+
+
+def render_rank_items(elems, extra=None):
+    """排行候选文本：屏幕提取 + （可选）跨步累积数据合并，按热度降序。
+    返回可直接注入 prompt 的文本；非榜单页面且无累积数据时返回空串。"""
+    pairs = extract_rank_pairs(elems)
+    acc = {}
+    for score, title in pairs:
+        if title not in acc or acc[title] < score:
+            acc[title] = score
+    for title, score in (extra or {}).items():
+        if title not in acc or acc[title] < score:
+            acc[title] = score
+    if len(acc) < 3:
         return ""
-    out.sort(key=lambda t: -t[0])
-    # 去掉重复标题
-    seen, uniq = set(), []
-    for score, title in out:
-        if title in seen:
-            continue
-        seen.add(title)
-        uniq.append((score, title))
-    lines = ["%d. %s（热度 %d）" % (i, t, s) for i, (s, t) in enumerate(uniq[:12], 1)]
+    items = sorted(acc.items(), key=lambda kv: -kv[1])
+    lines = ["%d. %s（热度 %d）" % (i, t, s) for i, (t, s) in enumerate(items[:15], 1)]
     return "\n".join(lines)
 
 
@@ -526,14 +567,18 @@ def qwen_verify(task, summary, screen_text, intent=""):
               % (task, ("\n（任务理解：%s）" % intent) if intent else "", summary[:400], screen_text[:3000]))
     reply = call_llm([{"role": "user", "content": prompt}])
     t = re.sub(r"<think[^>]*>.*?</think[^>]*>", " ", reply, flags=re.S)
-    m = re.search(r"\{[^{}]*\}", t, re.S)
-    if not m:
+    cands = re.findall(r"\{[^{}]*\}", t, re.S)
+    if not cands:
         return True, ""
-    try:
-        d = json.loads(m.group(0))
-        return bool(d.get("ok", True)), str(d.get("reason", ""))[:120]
-    except Exception:
-        return True, ""
+    # 取最后一个含 ok 字段的 JSON（模型可能先输出分析对象、最后才给结论；防首对象误判）
+    for cand in reversed(cands):
+        try:
+            d = json.loads(cand)
+        except Exception:
+            continue
+        if isinstance(d, dict) and "ok" in d:
+            return bool(d.get("ok", True)), str(d.get("reason", ""))[:120]
+    return True, ""
 
 
 def qwen_plan(task, apps):
@@ -950,6 +995,28 @@ APP_HINTS_BUILTIN = {
     "com.android.settings": "设置项都在首屏列表；找不到就向下滑动。电池电量：设置 → 电池。",
     "com.coloros.weather2": "打开即见当前温度与天气；未来几天预报向下滑动。",
     "com.tencent.mm": "底部导航（左→右）：微信 / 通讯录 / 发现 / 我。若显示登录页则无法查看消息。",
+    "com.aiyu.kaipanla": {
+        "hint": ("看市场数据：①「市场情绪」= 首页第 1 行第 2 个图标（约 (405,342)）→ "
+                 "首屏「涨跌统计」直接显示「实际涨停: N 家（过滤ST股）」「实际跌停: N 家」；"
+                 "②「龙虎榜」= 底部导航第 2 个 tab（约 (740,2281)）→ 今日上榜股票列表；"
+                 "③ 首页第 1 行第 1 个图标是「实时龙虎榜」。"
+                 "注意：打开 App 可能恢复上次的详情页（如市场情绪），若不在首页先按返回键回首页；"
+                 "首页特征：图标区含「实时龙虎榜/市场情绪/复盘啦/题材库」。"
+                 "底部导航：自选股 / 龙虎榜 / 推荐 / 行情。"),
+        "spots": [
+            ["市场情绪(开盘啦首页第1行第2个图标)", 405, 342, ["实时龙虎榜", "题材库"]],
+            ["龙虎榜(底部导航第2个)", 740, 2281, ["自选股", "龙虎榜", "行情"]],
+        ],
+    },
+    "com.ss.android.article.news": {
+        "hint": ("看某个板块（财经/军事/国际等）：顶部频道栏（y≈313）直接点对应频道——"
+                 "「财经」约 (445,313)、「军事」(599,313)、「国际」(752,313)；"
+                 "频道栏可左右滑动查看更多。顶栏下方就是该板块的信息流；顶部搜索框约 (654,181)。"
+                 "启动后可能停在别的板块（如短剧），点频道切回即可。"),
+        "spots": [
+            ["财经频道(今日头条顶部频道栏)", 445, 313, ["财经", "军事", "国际"]],
+        ],
+    },
 }
 _APP_CARDS = None
 
@@ -1289,6 +1356,10 @@ def main():
     scroll_streak = 0  # 连续滚动/滑动次数（迷路检测：≥6 次强制升级）
     last_sw_sig, sw_repeat = None, 0  # 连续相同滑动检测（≥3 软提醒，≥7 硬阻断）
     login_warned = False  # 登录页提示只发一次
+    rank_acc = {}      # 榜单跨步累积：title -> 最高热度（滚动收集"第N条"类任务用）
+    rank_ready = False       # 榜单收集足够（已提示可直接作答）
+    rank_collect_hint = False  # 榜单收集催促（只发一次）
+    kb_switched = False        # 键盘弹出已触发 qwen 接管（只触发一次）
 
     print("[agent] task: %s" % task)
     print("[agent] mode: %s | start engine: %s | upgrade-after: %d | max-steps: %d" %
@@ -1389,6 +1460,13 @@ def main():
                            % (_sp["label"], _sp["x"], _sp["y"]))
         except Exception:
             pass
+        # —— 榜单跨步累积：把本屏可见的「标题+热度」并入累积器（滚动收集"第N条"类任务用） ——
+        try:
+            for _score, _title in extract_rank_pairs(elems):
+                if _title not in rank_acc or rank_acc[_title] < _score:
+                    rank_acc[_title] = _score
+        except Exception:
+            pass
         screen_hash = hash(tuple((e[3][:24], e[1] // 16, e[2] // 16) for e in elems))
 
         # —— 上一步效果补记：用本步屏幕对比上一步执行后的变化，回传给模型（治"点了没反应还在点"） ——
@@ -1406,6 +1484,38 @@ def main():
             elif changed:
                 no_effect.clear()   # 屏幕已变化（加载完成/页面切换）→ 解除全部"无效"标记
             last_sig = None
+        # —— 榜单收集推进："第N条/前N名"任务：数据不足时催促滚动，足够时直接给出名次 ——
+        _rn = parse_rank_n(task) or parse_rank_n((plan or {}).get("intent") or "")
+        if _rn and step >= 2:
+            if len(rank_acc) >= _rn + 2:
+                if not rank_ready:
+                    _nth = rank_nth(rank_acc, _rn)
+                    if _nth:
+                        history.append({"role": "user", "content":
+                                        "（系统提醒）榜单数据已收集足够（%d 条）。按官方顺序（热度降序）"
+                                        "第 %d 条是：%s。如果任务就是问这一条，请直接输出 done 并给出该答案。"
+                                        % (len(rank_acc), _rn, _nth)})
+                        print("[step %d] 榜单收集完成: 第%d条 = %s" % (step, _rn, _nth[:40]))
+                        rank_ready = True
+            elif not rank_collect_hint and step >= 3:
+                history.append({"role": "user", "content":
+                                "（系统提醒）这是榜单任务（要第 %d 条），当前已收集 %d 条数据，还不足。"
+                                "请向下滚动榜单继续查看更多条目；系统会自动记录滚动过的条目。"
+                                % (_rn, len(rank_acc))})
+                rank_collect_hint = True
+
+        # —— 键盘弹出 = 需要文字输入（Jev 无 input_text 能力）→ 立即升级 qwen（决策前切换） ——
+        if (mode == "auto" and engine_now == "jev" and not kb_switched
+                and bool((state.get("phone_state") or {}).get("keyboardVisible"))):
+            kb_switched = True
+            engine_now = "qwen"
+            prog.score = 0
+            history.append({"role": "user", "content":
+                            "（系统）输入法键盘已弹出（需要输入文字）。由更强的模型接管："
+                            "请用 input_text 输入任务所需的关键词，"
+                            "再按 ENTER(键码 66) 或点「搜索」按钮提交，最后读取结果。"})
+            print("[step %d] 键盘弹出 → qwen 接管（需要文字输入）" % step)
+
         # —— 阶段性终点检查：每 6 步提醒引擎查看"答案是否已在屏幕上" ——
         if step > 1 and step % 6 == 1:
             history.append({"role": "user", "content":
@@ -1448,13 +1558,27 @@ def main():
             summary = act.get("summary", "")
             if not summary and act.get("answer_text"):
                 summary = act["answer_text"]
+            # 榜单单条任务（"第N条"）：累积数据足以确定名次 → 以系统确定答案为准（防模型猜错）
+            sys_locked = False
+            try:
+                m_nth = re.search(r"第\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[条名位个]", task or "")
+                if m_nth:
+                    _n2 = _cn2int(m_nth.group(1))
+                    _sys = rank_nth(rank_acc, _n2)
+                    if _sys:
+                        summary = "第 %d 条是：%s" % (_n2, _sys)
+                        sys_locked = True
+                        print("[agent] 榜单第%d条（系统确定）: %s" % (_n2, _sys[:50]))
+            except Exception:
+                pass
             # 列表类任务（前N/排行/哪些…）：Jev 的单条选择不算完整答案 → 强制 qwen 汇总全量
             multi = wants_multi_answer(task, plan)
-            if (not summary or len(summary) >= 60 or multi) and engine_now != "qwen":
+            if ((not summary or len(summary) >= 60 or multi) and engine_now != "qwen"
+                    and not sys_locked):
                 try:
                     polished = qwen_summary(task, render_elems(elems) if elems else render_tree(state),
                                             (plan or {}).get("intent") or "",
-                                            render_rank_items(elems) if elems else "")
+                                            render_rank_items(elems or [], extra=rank_acc))
                     if polished:
                         summary = polished
                 except Exception as e:
@@ -1463,7 +1587,7 @@ def main():
             # —— 防幻觉复核：结果须能在屏幕上找到依据（"无法完成"如实报告的直接放行） ——
             screen_text = " ".join(e[3] for e in elems)
             if (summary and done_rejects < 2 and len(screen_text) >= 30
-                    and not summary.startswith("无法")):
+                    and not summary.startswith("无法") and not sys_locked):
                 try:
                     v_ok, v_reason = qwen_verify(task, summary, screen_text,
                                                  (plan or {}).get("intent") or "")
@@ -1514,7 +1638,8 @@ def main():
         else:
             last_sw_sig, sw_repeat = None, 0
         sw_blocked = sw_sig is not None and sw_repeat >= 7
-        blocked = (sig is not None and (fail_counts.get(sig, 0) >= 2
+        _fail_lim = 3 if (sig is not None and sig[0] == "open_app") else 2
+        blocked = (sig is not None and (fail_counts.get(sig, 0) >= _fail_lim
                                         or no_effect.get(sig, 0) >= 2)) or sw_blocked
         if blocked:
             ok = False
@@ -1564,6 +1689,7 @@ def main():
                             tracer.log(step, "result", "包名矫正: %s -> %s" % (want, real))
                             act["package"] = real
                         portal.open_app(real or want)
+                        time.sleep(3.0)   # App 冷启动等待（大 App 被系统清理后重启需数秒）
                 elif a == "wait":
                     time.sleep(act.get("seconds", 1.5))
                 else:
