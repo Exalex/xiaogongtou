@@ -261,12 +261,21 @@ def collect_elements(state, limit=110):
         if label and isinstance(b, dict) and b:
             cx = (b.get("left", 0) + b.get("right", 0)) // 2
             cy = (b.get("top", 0) + b.get("bottom", 0)) // 2
-            out.append((len(out), cx, cy, label[:50], clickable))
+            out.append((len(out), cx, cy, label[:200], clickable))
         for c in node.get("children") or []:
             visit(c)
 
     visit(state.get("a11y_tree") or {})
     return out
+
+
+def render_elems(elems):
+    """补充后的元素清单（portal + 桥树）→ LLM 友好文本（qwen 与 jev 共用同一"事实来源"，
+    修复：此前 qwen 只吃 portal 原始树，桥树补盲对它不可见）。"""
+    lines = []
+    for idx, x, y, label, clickable in elems:
+        lines.append("(%d,%d) %s%s" % (x, y, label, " 可点" if clickable else ""))
+    return "\n".join(lines)
 
 
 def parse_uiauto_xml(xml):
@@ -295,7 +304,7 @@ def parse_uiauto_xml(xml):
         if label and m:
             cx = (int(m.group(1)) + int(m.group(3))) // 2
             cy = (int(m.group(2)) + int(m.group(4))) // 2
-            out.append((len(out), cx, cy, label[:50], clickable))
+            out.append((len(out), cx, cy, label[:200], clickable))
         for c in n:
             visit(c)
 
@@ -602,9 +611,17 @@ def load_experience(task, limit=2, min_score=0.2):
     return [ex for _, ex in scored[:limit]]
 
 
+_FAILURE_MARKS = ("无法", "未显示", "未找到", "找不到", "看不到", "没能", "没找到", "未能", "失败")
+
+
 def save_experience(task, result, steps, engine):
-    """任务成功后保存轨迹（按任务文本去重置顶，上限 50 条）。"""
+    """任务成功后保存轨迹（按任务文本去重置顶，上限 50 条）。
+    ①结果里带"失败话术"的（如"未显示/无法查看"）不算成功经验，直接丢弃；
+    ②轨迹清洗：去掉 wait，连续相同的 scroll/swipe 只留 1 条（防止把"滚动刷屏"当经验教坏下次）。"""
     if not task or not steps:
+        return
+    if any(w in (result or "") for w in _FAILURE_MARKS):
+        print("[agent] 结果含失败话术，不沉淀成功经验（转入失败教训）")
         return
     try:
         os.makedirs(SKILLS_DIR, exist_ok=True)
@@ -615,9 +632,16 @@ def save_experience(task, result, steps, engine):
             data = []
         if not isinstance(data, list):
             data = []
+        cleaned = []
+        for s in steps[-20:]:
+            if str(s).startswith("wait"):
+                continue
+            if cleaned and s == cleaned[-1] and (str(s).startswith("scroll") or str(s).startswith("swipe")):
+                continue
+            cleaned.append(s)
         data = [d for d in data if d.get("task") != task]
         data.insert(0, {"task": task, "result": (result or "")[:200], "engine": engine,
-                        "steps": steps[-20:], "ts": int(time.time())})
+                        "steps": cleaned[-20:], "ts": int(time.time())})
         with open(EXAMPLES_PATH, "w", encoding="utf-8") as f:
             json.dump(data[:50], f, ensure_ascii=False, indent=1)
     except Exception:
@@ -688,7 +712,9 @@ def learn_app_hint(task, exec_log, state, apps=None):
         if apps and all(str(a.get("packageName")) != pk for a in apps):
             return   # 包名不在已安装清单（幻觉包名，如 com.wallstreetcn）→ 不沉淀
         prompt = ("任务「%s」在 App（%s）上成功完成，执行步骤：%s\n"
-                  "请总结一条「App 使用要点」（30 字内、可给下一次同类任务当捷径提示），"
+                  "请总结一条「App 使用要点」（30 字内）。要求：通用、与具体任务无关——"
+                  "只写这个 App 的界面结构/入口位置/操作方式（如「底部导航第三个是发现」「搜索框在顶部」），"
+                  "不要写具体任务的搜索词或内容（例如不要写「搜索XX」）。"
                   "只输出 JSON：{\"hint\": \"...\"}" % (task[:80], pk, steps_text[:500]))
         reply = call_llm([{"role": "user", "content": prompt}])
         t = re.sub(r"<think[^>]*>.*?</think[^>]*>", " ", reply, flags=re.S)
@@ -822,9 +848,13 @@ def label_at(elems, x, y, tol=70):
 
 # ---------------------------------------------------------------- App 使用要点（经验卡雏形）
 APP_HINTS_BUILTIN = {
-    "com.sina.weibo": ("看热搜榜（最可靠路径）：点顶部搜索框 → 搜索页里就有完整的「微博热搜榜」列表。"
-                       "备选：点底部导航「发现」；若底部中部显示「回到顶部」浮动按钮，先点它一次再点「发现」。"
-                       "若发现页空白（未登录时可能如此），改用搜索框路径。"
+    "com.sina.weibo": ("看热搜榜（2026-09-24 实测有效）：①点底部导航「发现」（底部中部，约 (540,2277)；"
+                       "若该位置显示的是「回到顶部」浮动按钮，先点它一次、再点「发现」）；"
+                       "②「微博热搜」榜单就在发现页【最上方】（标题行「微博热搜」，下方两列约 12 条）："
+                       "直接读前 5 条然后 done——不要滚动、不要点搜索框；"
+                       "③若顶部看到的不是榜单（而是「热点/星品」标签或帖子流，说明页面停在中间）："
+                       "点一次屏幕上的「回到顶部」把页面滚回顶端，再读榜单；④仍不行：连按返回回首页重新走①。"
+                       "注意：不要点顶部搜索框输入文字搜索（访客模式搜不到榜单）。"
                        "底部导航（左→右）：首页 / 视频 / 发现 / 消息 / 我。"),
     "com.android.settings": "设置项都在首屏列表；找不到就向下滑动。电池电量：设置 → 电池。",
     "com.coloros.weather2": "打开即见当前温度与天气；未来几天预报向下滑动。",
@@ -1034,7 +1064,7 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
             return act, "jev", time.time() - t0, ti
         except Exception as e:
             print("[step %d] jev failed: %r -> qwen fallback" % (step, e))
-    screen = render_tree(state)
+    screen = render_elems(elems) if elems else render_tree(state)
     exp_text = render_experience(experience)
     exp_block = ("\n\n参考经验（上次类似任务的成功做法，可借鉴；若与实际屏幕不符则忽略）：\n" + exp_text) \
         if exp_text else ""
@@ -1262,12 +1292,15 @@ def main():
             summary = act.get("summary", "")
             if not summary and act.get("answer_text"):
                 summary = act["answer_text"]
-            if not summary and engine_now != "qwen":
+            if (not summary or len(summary) >= 60) and engine_now != "qwen":
                 try:
-                    summary = qwen_summary(task, render_tree(state),
-                                           (plan or {}).get("intent") or "")
+                    polished = qwen_summary(task, render_elems(elems) if elems else render_tree(state),
+                                            (plan or {}).get("intent") or "")
+                    if polished:
+                        summary = polished
                 except Exception as e:
-                    summary = "(总结生成失败: %r)" % e
+                    if not summary:
+                        summary = "(总结生成失败: %r)" % e
             # —— 防幻觉复核：结果须能在屏幕上找到依据（"无法完成"如实报告的直接放行） ——
             screen_text = " ".join(e[3] for e in elems)
             if (summary and done_rejects < 2 and len(screen_text) >= 30
@@ -1446,6 +1479,19 @@ def main():
                             "快速引擎连续多步无进展（重复动作/屏幕无变化/连续滚动找不到目标）。"
                             "现在由更强的模型接管：请根据当前屏幕与任务重新规划，避免重复此前无效动作。"
                             "若屏幕上已有任务所需的信息，请直接输出 done 并给出答案。"})
+        elif prog.score >= upgrade_after:
+            # 已在 qwen 且再次连续无进展 → 迷路重置提示（防"原地打转"，2026-09-24 新增）
+            prog.score = 0
+            scroll_streak = 0
+            print("[step %d] [reset] 连续无进展（%s）→ 注入迷路重置提示" %
+                  (step, ",".join(flags) if flags else "-"))
+            tracer.log(step, "result", "迷路重置提示: %s" % (",".join(flags) if flags else "-"))
+            history.append({"role": "user", "content":
+                            "（系统警告）你已连续多步没有进展（%s）。立即改变做法："
+                            "①先按返回键回到本应用首页/上级页面（确认看到底部导航或首页内容）；"
+                            "②然后按计划重新进入目标页面，优先尝试计划里的另一个入口；"
+                            "禁止继续重复上一步动作或原地滑动。"
+                            % (",".join(flags) if flags else "重复动作/无进展")})
         time.sleep(0.8)
 
     print("[agent] engine-usage: jev=%d qwen=%d" % (usage["jev"], usage["qwen"]))

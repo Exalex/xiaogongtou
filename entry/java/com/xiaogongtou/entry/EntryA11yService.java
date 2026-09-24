@@ -512,7 +512,7 @@ public class EntryA11yService extends AccessibilityService {
 
     private int collectNodes(android.view.accessibility.AccessibilityNodeInfo n,
                              org.json.JSONArray arr, int idx, int depth) {
-        if (n == null || depth > 20 || idx >= 400) {
+        if (n == null || depth > 40 || idx >= 400) {
             return idx;
         }
         try {
@@ -528,7 +528,7 @@ public class EntryA11yService extends AccessibilityService {
                     one.put(idx);
                     one.put(b.centerX());
                     one.put(b.centerY());
-                    one.put(label.length() > 50 ? label.substring(0, 50) : label);
+                    one.put(label.length() > 220 ? label.substring(0, 220) : label);
                     one.put(clk);
                     arr.put(one);
                     idx++;
