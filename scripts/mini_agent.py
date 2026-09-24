@@ -379,7 +379,7 @@ def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg
         names = "、".join("%s（%s）" % (ra.get("label"), ra.get("package")) for ra in related_apps)
         target_instr += ("\n本机相关应用：%s。若任务需要用某个应用而现在不在其中，"
                          "优先选「打开应用…」而不是在当前应用里乱点。" % names)
-    hint = app_hints().get(cur_pkg or "")
+    hint = app_hint_of(cur_pkg)
     if hint:
         target_instr += "\n本 App 使用要点：%s" % hint
     plan_text = render_plan(plan)
@@ -435,12 +435,72 @@ def jev_to_action(ans, elems, related_apps=None):
     return {"action": "wait", "confidence": conf}
 
 
-def qwen_summary(task, screen_text, intent=""):
-    prompt = ("任务：%s%s\n\n当前屏幕元素：\n%s\n\n"
+MULTI_ANSWER_RE = re.compile(r"前[0-9一二三四五六七八九十]+|[几哪]条|哪些|列表|排名|排行|榜单|都有|全部")
+
+
+def wants_multi_answer(task, plan):
+    """任务是否要求「多条/列表类」答案（前N、哪些、排行…）。
+    这类答案 Jev 的单条选择通常不完整 → done 时强制 qwen 汇总全量答案。"""
+    texts = [task or "", (plan or {}).get("intent") or "", (plan or {}).get("success") or ""]
+    return any(MULTI_ANSWER_RE.search(t) for t in texts)
+
+
+def render_rank_items(elems):
+    """从屏幕元素提取「官方排名候选」：标题 + 同一行（y 接近）的热度数值，按数值降序。
+    背景：微博热搜等榜单的「1/2/3」序号与「置顶」标记是自绘图形、不在无障碍数据里，
+    只能靠「热度值降序」推断官方名次（置顶/推广条目无热度值 → 自动被排除）。
+    返回可直接注入 prompt 的文本；非榜单页面返回空串。"""
+    nums = []
+    for e in elems:
+        s = str(e[3]).strip()
+        m = re.search(r"\d{4,}", s)
+        if m:
+            digits = re.sub(r"\D", "", s)
+            # 数字元素判定：数字占比高（如 "1090896"、"剧集 579667"、"623773 [金牌]"）
+            if len(digits) >= 5 and len(digits) >= len(s) * 0.45:
+                nums.append((e[2], e[1], int(m.group(0)), s))
+    if len(nums) < 3:
+        return ""
+    out = []
+    for (ny, nx, score, _raw) in nums:
+        best = None
+        for e in elems:
+            if not str(e[3]).strip():
+                continue
+            if abs(e[2] - ny) <= 40 and e[1] < nx - 30:
+                if re.fullmatch(r"[\d\s,]+", str(e[3]).strip()):
+                    continue
+                if best is None or abs(e[2] - ny) < abs(best[0] - ny):
+                    best = (e[2], str(e[3]).strip())
+        if best:
+            out.append((score, best[1]))
+    if len(out) < 3:
+        return ""
+    out.sort(key=lambda t: -t[0])
+    # 去掉重复标题
+    seen, uniq = set(), []
+    for score, title in out:
+        if title in seen:
+            continue
+        seen.add(title)
+        uniq.append((score, title))
+    lines = ["%d. %s（热度 %d）" % (i, t, s) for i, (s, t) in enumerate(uniq[:12], 1)]
+    return "\n".join(lines)
+
+
+def qwen_summary(task, screen_text, intent="", rank_text=""):
+    rank_block = ""
+    if rank_text:
+        rank_block = ("\n\n【官方排名候选】屏幕上的榜单条目（按热度数值降序，即官方名次顺序；"
+                      "置顶/推广条目因无热度值已自动排除）：\n%s\n"
+                      "如果任务要「前N名/排行」，请优先按以上名次与顺序作答。" % rank_text)
+    prompt = ("任务：%s%s\n\n当前屏幕元素：\n%s%s\n\n"
               "请直接给出任务要求的答案（简洁、口语化）。要求：只输出答案本身，"
               "不要输出操作步骤/坐标/操作建议；若答案包含多项（如列表、前N条、多个数值），"
-              "请编号逐条列出屏幕上实际显示的内容。"
-              % (task, ("\n（任务理解：%s）" % intent) if intent else "", screen_text[:3000]))
+              "请编号逐条列出屏幕上实际显示的内容（从上到下、按屏幕顺序、一条不漏）。"
+              "若屏幕是排行榜（如微博热搜榜），按榜单顺序列出任务要求的名次；"
+              "置顶条目与广告推广条目不算名次（除非任务就是要置顶内容）。"
+              % (task, ("\n（任务理解：%s）" % intent) if intent else "", screen_text[:3000], rank_block))
     return call_llm([{"role": "user", "content": prompt}])
 
 
@@ -459,6 +519,9 @@ def qwen_verify(task, summary, screen_text, intent=""):
               "④ 结果的主题/来源必须与任务点名的对象一致：任务是「看华尔街见闻的头条新闻」，"
               "结果就必须是「华尔街见闻」的新闻内容；来自其他来源或内容主题不符"
               "（如别的网站/页面的股票行情数据）一律判 false。\n"
+              "⑤ 若任务要求「排行/榜单/前N名/热搜榜」，结果必须来自明确的排行榜——"
+              "条目带排名序号（1、2、3…）或明确名次，且名次从第 1 名开始连续；"
+              "个性化推荐流 / 猜你喜欢 / 雷达流 / 顺序随机的列表不算排行，判 false。\n"
               "只输出一个 JSON：{\"ok\": true 或 false, \"reason\": \"一句话理由\"}"
               % (task, ("\n（任务理解：%s）" % intent) if intent else "", summary[:400], screen_text[:3000]))
     reply = call_llm([{"role": "user", "content": prompt}])
@@ -711,6 +774,13 @@ def learn_app_hint(task, exec_log, state, apps=None):
             return
         if apps and all(str(a.get("packageName")) != pk for a in apps):
             return   # 包名不在已安装清单（幻觉包名，如 com.wallstreetcn）→ 不沉淀
+        # 手册卡保护：含实测坐标（spots）的 App 卡片为人工维护，自动学习不覆盖其要点
+        try:
+            if (app_cards().get(pk) or {}).get("spots"):
+                print("[agent] App 要点跳过（%s 为手工维护卡，自动学习不覆盖）" % pk)
+                return
+        except Exception:
+            pass
         prompt = ("任务「%s」在 App（%s）上成功完成，执行步骤：%s\n"
                   "请总结一条「App 使用要点」（30 字内）。要求：通用、与具体任务无关——"
                   "只写这个 App 的界面结构/入口位置/操作方式（如「底部导航第三个是发现」「搜索框在顶部」），"
@@ -848,34 +918,96 @@ def label_at(elems, x, y, tol=70):
 
 # ---------------------------------------------------------------- App 使用要点（经验卡雏形）
 APP_HINTS_BUILTIN = {
-    "com.sina.weibo": ("看热搜榜（2026-09-24 实测有效）：①点底部导航「发现」（底部中部，约 (540,2277)；"
-                       "若该位置显示的是「回到顶部」浮动按钮，先点它一次、再点「发现」）；"
-                       "②「微博热搜」榜单就在发现页【最上方】（标题行「微博热搜」，下方两列约 12 条）："
-                       "直接读前 5 条然后 done——不要滚动、不要点搜索框；"
-                       "③若顶部看到的不是榜单（而是「热点/星品」标签或帖子流，说明页面停在中间）："
-                       "点一次屏幕上的「回到顶部」把页面滚回顶端，再读榜单；④仍不行：连按返回回首页重新走①。"
-                       "注意：不要点顶部搜索框输入文字搜索（访客模式搜不到榜单）。"
-                       "底部导航（左→右）：首页 / 视频 / 发现 / 消息 / 我。"),
+    "com.sina.weibo": {
+        "hint": ("看【真实热搜排行】三步（2026-09-24 真机实测）："
+                 "① 底部导航点「发现」；"
+                 "② 发现页热搜卡片右下角点「更多热搜」（坐标约 (907,846)）；"
+                 "③ 进入后默认停在「我的」标签=个性化雷达（不是排行！），"
+                 "必须再点顶部标签栏第 2 个「热搜」（坐标约 (267,624)）→ 出现"
+                 "「实时热点，每分钟更新一次」+ 带编号 1、2、3… 的榜单，这才是真正的热搜排行。"
+                 "注意：发现页卡片、「我的」标签页都是个性化内容（顺序随机），不算排行；"
+                 "真榜条目名后带热度数字（如 1090896）。"
+                 "若底部中部显示「回到顶部」浮动按钮，先点它一次再点「发现」。"
+                 "底部导航（左→右）：首页 / 视频 / 发现 / 消息 / 我。"),
+        "spots": [
+            ["更多热搜(发现页热搜卡片右下角)", 907, 846, ["更多热搜", "热搜简报"]],
+            ["热搜排行标签(顶部标签栏第2个)", 267, 624, ["文娱", "实时热点", "热搜雷达"]],
+        ],
+    },
     "com.android.settings": "设置项都在首屏列表；找不到就向下滑动。电池电量：设置 → 电池。",
     "com.coloros.weather2": "打开即见当前温度与天气；未来几天预报向下滑动。",
     "com.tencent.mm": "底部导航（左→右）：微信 / 通讯录 / 发现 / 我。若显示登录页则无法查看消息。",
 }
-_APP_HINTS = None
+_APP_CARDS = None
 
 
-def app_hints():
-    """App 使用要点 = 内置 + ~/bridge/skills/apps.json（外部可覆盖/补充，不进 git）"""
-    global _APP_HINTS
-    if _APP_HINTS is None:
-        _APP_HINTS = dict(APP_HINTS_BUILTIN)
+def normalize_app_card(v):
+    """统一 App 卡片格式 → {"hint": str, "spots": [{"label","x","y","whens"}]}
+    支持 str（纯提示文本）或 dict（{"hint":..., "spots": [["label",x,y,["特征词"...]], ...]}）。"""
+    if isinstance(v, str):
+        return {"hint": v, "spots": []}
+    if isinstance(v, dict):
+        spots = []
+        for s in (v.get("spots") or []):
+            try:
+                spots.append({"label": str(s[0]), "x": int(s[1]), "y": int(s[2]),
+                              "whens": [str(w) for w in (s[3] if len(s) > 3 else [])]})
+            except Exception:
+                pass
+        return {"hint": str(v.get("hint") or ""), "spots": spots}
+    return {"hint": "", "spots": []}
+
+
+def app_cards():
+    """App 经验卡（统一格式，含坐标补丁 spots）= 内置 + ~/bridge/skills/apps.json（外部可覆盖/补充）。
+    外部若给 str，只覆盖 hint、保留内置 spots；给 dict 则整体覆盖。"""
+    global _APP_CARDS
+    if _APP_CARDS is None:
+        cards = {str(k): normalize_app_card(v) for k, v in APP_HINTS_BUILTIN.items()}
         try:
             with open(os.path.expanduser("~/bridge/skills/apps.json"), encoding="utf-8") as f:
                 d = json.load(f)
             if isinstance(d, dict):
-                _APP_HINTS.update({str(k): str(v) for k, v in d.items()})
+                for k, v in d.items():
+                    k = str(k)
+                    if isinstance(v, dict):
+                        cards[k] = normalize_app_card(v)
+                    else:
+                        old = cards.get(k) or {"hint": "", "spots": []}
+                        cards[k] = {"hint": str(v), "spots": old.get("spots") or []}
         except Exception:
             pass
-    return _APP_HINTS
+        _APP_CARDS = cards
+    return _APP_CARDS
+
+
+def app_hint_of(pkg):
+    """当前 App 的文字要点（给 Jev/qwen 的提示词用）。"""
+    c = app_cards().get(pkg or "")
+    return (c or {}).get("hint") or ""
+
+
+def app_coords(pkg, elems):
+    """App 经验坐标：页面特征词出现时，把实测坐标作为虚拟元素返回（Jev/qwen 可直接选用点击）。
+    - pkg 非空：只看该 App 的卡片；pkg 为空（portal 离线）：扫描全部卡片（靠特征词过滤）。
+    - 防重复：屏幕上已有坐标接近且同名元素时跳过。"""
+    cards = app_cards()
+    if pkg:
+        cand = [cards.get(pkg) or {}]
+    else:
+        cand = list(cards.values())
+    labels = "|".join(str(e[3]) for e in elems)
+    out = []
+    for card in cand:
+        for sp in (card.get("spots") or []):
+            whens = sp.get("whens") or []
+            if whens and not any(w and (w in labels) for w in whens):
+                continue
+            dup = any(abs(e[1] - sp["x"]) < 40 and abs(e[2] - sp["y"]) < 40
+                      and sp["label"][:4] in str(e[3]) for e in elems)
+            if not dup:
+                out.append(sp)
+    return out
 
 
 # 内容区常被 a11y 过滤的 App（即使 portal 元素数不低，也强制 uiautomator 补盲）
@@ -1076,7 +1208,7 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
     app_note = ""
     try:
         _pk = (state.get("phone_state") or {}).get("packageName") or ""
-        _h = app_hints().get(_pk)
+        _h = app_hint_of(_pk)
         if _h:
             app_note = "\n\n本 App 使用要点：%s" % _h
     except Exception:
@@ -1217,15 +1349,15 @@ def main():
                 aborted = True
                 break
         elems = collect_elements(state)
+        cur_pkg = ""
+        try:
+            cur_pkg = (state.get("phone_state") or {}).get("packageName") or ""
+        except Exception:
+            pass
         if pre_elems is not None:
             elems = pre_elems
         else:
             # —— 感知补盲：portal 树元素过少（内容区被标记"不重要"被过滤）→ 用 root 桥完整树 ——
-            cur_pkg = ""
-            try:
-                cur_pkg = (state.get("phone_state") or {}).get("packageName") or ""
-            except Exception:
-                pass
             if len(elems) < 8 or cur_pkg in blind_apps():
                 extra = bridge_elements()
                 if len(extra) > len(elems):
@@ -1233,6 +1365,17 @@ def main():
                           % (step, len(elems), len(extra)))
                     tracer.log(step, "result", "感知补盲 %d->%d 元素" % (len(elems), len(extra)))
                     elems = extra
+        # —— 经验坐标注入：App 卡片实测坐标（如微博「更多热搜」「热搜」标签）→ 虚拟元素（Jev/qwen 可直接点） ——
+        try:
+            for _sp in app_coords(cur_pkg, elems):
+                elems.append((len(elems), _sp["x"], _sp["y"],
+                              "%s【经验坐标】" % _sp["label"], True))
+                print("[step %d] 经验坐标注入: %s (%d,%d)"
+                      % (step, _sp["label"], _sp["x"], _sp["y"]))
+                tracer.log(step, "result", "经验坐标注入: %s (%d,%d)"
+                           % (_sp["label"], _sp["x"], _sp["y"]))
+        except Exception:
+            pass
         screen_hash = hash(tuple((e[3][:24], e[1] // 16, e[2] // 16) for e in elems))
 
         # —— 上一步效果补记：用本步屏幕对比上一步执行后的变化，回传给模型（治"点了没反应还在点"） ——
@@ -1292,10 +1435,13 @@ def main():
             summary = act.get("summary", "")
             if not summary and act.get("answer_text"):
                 summary = act["answer_text"]
-            if (not summary or len(summary) >= 60) and engine_now != "qwen":
+            # 列表类任务（前N/排行/哪些…）：Jev 的单条选择不算完整答案 → 强制 qwen 汇总全量
+            multi = wants_multi_answer(task, plan)
+            if (not summary or len(summary) >= 60 or multi) and engine_now != "qwen":
                 try:
                     polished = qwen_summary(task, render_elems(elems) if elems else render_tree(state),
-                                            (plan or {}).get("intent") or "")
+                                            (plan or {}).get("intent") or "",
+                                            render_rank_items(elems) if elems else "")
                     if polished:
                         summary = polished
                 except Exception as e:
@@ -1319,6 +1465,8 @@ def main():
                                     "content": json.dumps(act, ensure_ascii=False)})
                     history.append({"role": "user", "content":
                                     "你的完成申报被系统驳回：%s。任务尚未真正完成，请继续操作；"
+                                    "若任务要求多条内容（前N条/列表/排行），summary 必须逐条列全"
+                                    "（如「1. xxx 2. xxx 3. xxx」），只给一条不算完成。"
                                     "如果确实无法完成，请再次输出 done，并在 summary 中如实说明"
                                     "「无法完成：原因」。" % (v_reason or "结果在屏幕上找不到依据")})
                     time.sleep(1.0)
