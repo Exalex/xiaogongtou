@@ -69,6 +69,8 @@ SYSTEM_PROMPT = (
     '- {"action":"wait"} 等待界面加载\n'
     '- {"action":"done","summary":"给用户的最终答案"} 任务完成时输出\n'
     "规则：一次只做一步；只能使用列表中出现过的坐标；任务完成立即用 done 收尾；"
+    "done 的 summary 必须包含实际查到的具体内容（如新闻标题/名称/数值），"
+    "不要只说「已找到/包含多条」等空话；"
     "禁止操作登录/验证码/账号密码类元素（不要点击、不要输入）；"
     '可在 JSON 中加 "thought" 字段简述思路，但不要输出多余文字。'
 )
@@ -334,7 +336,7 @@ def uiauto_elements(timeout=8.0):
         return []
 
 
-def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg=""):
+def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg="", plan=None):
     # 保护：Jev 的 Choice criteria 选项上限 255（含动作项）——元素过多时截断
     if len(elems) > 180:
         elems = elems[:180]
@@ -371,6 +373,11 @@ def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg
     hint = app_hints().get(cur_pkg or "")
     if hint:
         target_instr += "\n本 App 使用要点：%s" % hint
+    plan_text = render_plan(plan)
+    if plan_text:
+        target_instr += ("\n" + plan_text +
+                         "\n请按此计划推进：若尚未在目标应用内，优先选择「打开应用」；"
+                         "达到完成标准时用 done 收尾。")
     questions = {
         "target": {"type": "choice",
             "instructions": target_instr,
@@ -419,24 +426,32 @@ def jev_to_action(ans, elems, related_apps=None):
     return {"action": "wait", "confidence": conf}
 
 
-def qwen_summary(task, screen_text):
-    messages = [{"role": "user", "content":
-                 "任务：%s\n\n当前屏幕元素：\n%s\n\n请给出任务要求的答案（简洁、口语化）；"
-                 "如果答案包含多项（如列表、前N条、多个数值），请编号逐条列出。"
-                 % (task, screen_text[:3000])}]
-    return call_llm(messages)
+def qwen_summary(task, screen_text, intent=""):
+    prompt = ("任务：%s%s\n\n当前屏幕元素：\n%s\n\n"
+              "请直接给出任务要求的答案（简洁、口语化）。要求：只输出答案本身，"
+              "不要输出操作步骤/坐标/操作建议；若答案包含多项（如列表、前N条、多个数值），"
+              "请编号逐条列出屏幕上实际显示的内容。"
+              % (task, ("\n（任务理解：%s）" % intent) if intent else "", screen_text[:3000]))
+    return call_llm([{"role": "user", "content": prompt}])
 
 
-def qwen_verify(task, summary, screen_text):
+def qwen_verify(task, summary, screen_text, intent=""):
     """复核 done：summary 的关键信息能否在屏幕文本中找到依据（防幻觉）+ 内容类型是否匹配任务。
+    intent = 规划阶段纠正后的任务理解（避免语音错别字干扰判定）。
     返回 (ok, reason)；复核本身失败时一律放行（不阻塞正常收尾）。"""
-    prompt = ("任务：%s\n\n待核实的结果：%s\n\n当前屏幕文本：\n%s\n\n"
-              "请判断：以上结果是否【真正回答了任务】？两个条件都要满足：\n"
+    prompt = ("任务：%s%s\n\n待核实的结果：%s\n\n当前屏幕文本：\n%s\n\n"
+              "请判断：以上结果是否【真正回答了任务】？以下条件都要满足：\n"
               "① 结果里的关键信息（名称/数字/列表项）能在当前屏幕文本中找到依据（找不到=幻觉，判 false）；\n"
               "② 内容类型与任务要求一致（例：任务要「热搜榜」，结果必须是热搜列表，"
               "普通帖子流/推荐内容不算；任务要「电量」，结果必须是电池数值）。\n"
+              "结果若只是操作建议/步骤说明（而非实际查询到的内容），判 false。\n"
+              "③ 若任务要求查看/查询具体内容（新闻、列表、热点、多条信息等），结果必须列出至少一条"
+              "实际内容（标题/名称/数值）；只说「已找到」「包含多条」而没有具体条目，判 false。\n"
+              "④ 结果的主题/来源必须与任务点名的对象一致：任务是「看华尔街见闻的头条新闻」，"
+              "结果就必须是「华尔街见闻」的新闻内容；来自其他来源或内容主题不符"
+              "（如别的网站/页面的股票行情数据）一律判 false。\n"
               "只输出一个 JSON：{\"ok\": true 或 false, \"reason\": \"一句话理由\"}"
-              % (task, summary[:400], screen_text[:3000]))
+              % (task, ("\n（任务理解：%s）" % intent) if intent else "", summary[:400], screen_text[:3000]))
     reply = call_llm([{"role": "user", "content": prompt}])
     t = re.sub(r"<think[^>]*>.*?</think[^>]*>", " ", reply, flags=re.S)
     m = re.search(r"\{[^{}]*\}", t, re.S)
@@ -447,6 +462,75 @@ def qwen_verify(task, summary, screen_text):
         return bool(d.get("ok", True)), str(d.get("reason", ""))[:120]
     except Exception:
         return True, ""
+
+
+def qwen_plan(task, apps):
+    """开工前规划（2026-09-24 新增）：qwen 先理解任务（纠正语音同音字/错别字）
+    → 从已安装清单里选目标 App → 列出执行计划与完成标准。
+    返回 dict 或 None（失败时静默跳过，不阻塞任务）。"""
+    app_lines = "、".join(
+        "%s(%s)" % (a.get("label"), a.get("packageName")) for a in (apps or [])[:150])
+    prompt = (
+        "你是手机自动化任务的规划器。用户用语音输入，任务文本可能有同音字/错别字，"
+        "请先理解真实意图（例如「开盘了APP」很可能是指「开盘啦」App；「胎盘」可能是「盘面/开盘啦」）。\n\n"
+        "任务原文：%s\n\n本机已安装应用（名称(包名)）：\n%s\n\n"
+        "注意：若任务点名的应用/来源本机没有安装，app_label 与 app_package 填 null，"
+        "并在 fallback 里给出替代方案（优先：用「浏览器」打开其官网或搜索该来源）。\n"
+        "请只输出一个 JSON（不要多余文字、不要 markdown）：\n"
+        "{\"intent\": \"一句话说明用户想要什么（已纠正错别字）\", "
+        "\"app_label\": \"完成任务最需要的应用名（必须来自上面清单；没有则 null）\", "
+        "\"app_package\": \"对应包名（必须来自上面清单；没有则 null）\", "
+        "\"plan\": [\"第1步\", \"第2步\", \"第3步\", \"第4步\"], "
+        "\"success\": \"屏幕上出现什么即算完成（一句话）\", "
+        "\"fallback\": \"若目标应用不存在或打不开，用什么替代方案（如用浏览器搜索XX）\"}"
+        % (task[:400], app_lines[:2500]))
+    reply = call_llm([{"role": "user", "content": prompt}])
+    t = re.sub(r"<think[^>]*>.*?</think[^>]*>", " ", reply, flags=re.S)
+    m = re.search(r"\{.*\}", t, re.S)
+    if not m:
+        return None
+    try:
+        d = json.loads(m.group(0))
+    except Exception:
+        return None
+    if not isinstance(d, dict):
+        return None
+    pk = str(d.get("app_package") or "").strip()
+    label = str(d.get("app_label") or "").strip()
+    real = ""
+    if pk:
+        if any(str(a.get("packageName")) == pk for a in apps):
+            real = pk
+        else:
+            real = resolve_package(pk, apps) or ""
+    if not real and label:
+        for a in apps:
+            if str(a.get("label") or "") == label:
+                real = str(a.get("packageName") or "")
+                break
+    d["app_package"] = real
+    d["app_label"] = label
+    return d
+
+
+def render_plan(plan):
+    """规划 → 注入两引擎 prompt 的文本块（Jev 与 qwen 共用）。"""
+    if not plan:
+        return ""
+    lines = []
+    if plan.get("intent"):
+        lines.append("【任务理解】%s" % plan["intent"])
+    if plan.get("app_package"):
+        lines.append("【目标应用】%s（%s）——当前不在其中时优先用「打开应用」进入"
+                     % (plan.get("app_label") or "", plan["app_package"]))
+    else:
+        fb = ("；备用方案：%s" % plan.get("fallback")) if plan.get("fallback") else ""
+        lines.append("【目标应用】本机未安装该应用，不要臆造包名%s" % fb)
+    if plan.get("plan"):
+        lines.append("【执行计划】" + " → ".join(str(s) for s in plan["plan"][:8]))
+    if plan.get("success"):
+        lines.append("【完成标准】%s" % plan["success"])
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- 调试 trace
@@ -556,6 +640,7 @@ def render_experience(exps):
                 i, ex.get("task", "")[:36], len(ex.get("steps") or []), (ex.get("result") or "")[:40]))
             for s in (ex.get("steps") or [])[:12]:
                 lines.append("   %s" % s)
+    lines.append("（注：经验仅供参考操作路径；作答必须以当前屏幕的实际内容为准，不得照抄旧结果。）")
     return "\n".join(lines)
 
 
@@ -581,9 +666,10 @@ def save_failure(task, reason, steps):
         pass
 
 
-def learn_app_hint(task, exec_log, state):
+def learn_app_hint(task, exec_log, state, apps=None):
     """任务成功后：qwen 归纳一条「App 使用要点」写入 ~/bridge/skills/apps.json（自我进化）。
-    下次同类任务会作为捷径提示注入 Jev/qwen。"""
+    下次同类任务会作为捷径提示注入 Jev/qwen。
+    apps 传入已安装清单时做校验：包名不在清单里（模型臆造）→ 不沉淀。"""
     try:
         if not task or not exec_log:
             return
@@ -599,6 +685,8 @@ def learn_app_hint(task, exec_log, state):
                 pk = ""
         if not pk:
             return
+        if apps and all(str(a.get("packageName")) != pk for a in apps):
+            return   # 包名不在已安装清单（幻觉包名，如 com.wallstreetcn）→ 不沉淀
         prompt = ("任务「%s」在 App（%s）上成功完成，执行步骤：%s\n"
                   "请总结一条「App 使用要点」（30 字内、可给下一次同类任务当捷径提示），"
                   "只输出 JSON：{\"hint\": \"...\"}" % (task[:80], pk, steps_text[:500]))
@@ -781,8 +869,10 @@ def blind_apps():
 
 
 def resolve_package(want, apps):
-    """把模型给出的包名解析成本机真实包名（精确 → 关键词模糊）。
+    """把模型给出的包名解析成本机真实包名（精确 → 有意义段模糊）。
     例：com.miui.weather → com.coloros.weather2（本机天气 App）。
+    注意：只匹配包名里"有意义的段"（排除 com/app 等通用词），
+    避免 "com.xxx.app" 的尾段 "app" 匹配到 com.jingdong.app.mall 这类灾难（2026-09-24 实证）。
     返回 None 表示本机明确没有匹配的应用。
     """
     if not want:
@@ -794,8 +884,10 @@ def resolve_package(want, apps):
         p = str(a.get("packageName") or "")
         if p and p.lower() == w:
             return p                       # 精确命中
-    key = w.split(".")[-1]
-    if len(key) >= 3:
+    generic = {"com", "cn", "net", "org", "android", "app", "apps", "mobile", "client",
+               "lite", "pro", "hd", "main", "phone", "pad", "plus", "free", "inc"}
+    segs = [s for s in w.split(".") if len(s) >= 4 and s not in generic]
+    for key in sorted(segs, key=len, reverse=True):
         cands = []
         for a in apps:
             p = str(a.get("packageName") or "")
@@ -912,7 +1004,7 @@ class Progress:
         return flags
 
 
-def decide(step, task, state, history, engine_now, elems, experience=None, related_apps=None):
+def decide(step, task, state, history, engine_now, elems, experience=None, related_apps=None, plan=None):
     """返回 (act, engine_name, seconds, trace_info)。trace_info = {"prompt":..., "reply":...}"""
     t0 = time.time()
     if engine_now == "jev":
@@ -922,7 +1014,7 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
                 cur_pkg = (state.get("phone_state") or {}).get("packageName") or ""
             except Exception:
                 pass
-            answers = jev_decide(task, elems, history, experience, related_apps, cur_pkg)
+            answers = jev_decide(task, elems, history, experience, related_apps, cur_pkg, plan)
             act = jev_to_action(answers.get("target"), elems, related_apps)
             ans_pick = (answers.get("answer") or {}).get("choice", "none")
             if isinstance(ans_pick, str) and ans_pick.startswith("elem_"):
@@ -959,8 +1051,10 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
             app_note = "\n\n本 App 使用要点：%s" % _h
     except Exception:
         pass
-    user = ("任务: %s\n\n第 %d 步。当前屏幕元素清单：\n%s%s%s%s\n\n"
-            "请输出下一步动作 JSON。" % (task, step, screen, exp_block, app_hint, app_note))
+    plan_text = render_plan(plan)
+    plan_block = ("\n\n" + plan_text) if plan_text else ""
+    user = ("任务: %s%s\n\n第 %d 步。当前屏幕元素清单：\n%s%s%s%s\n\n"
+            "请输出下一步动作 JSON。" % (task, plan_block, step, screen, exp_block, app_hint, app_note))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-10:] + \
                [{"role": "user", "content": user}]
     reply = call_llm(messages)
@@ -1018,6 +1112,7 @@ def main():
     block_streak = 0   # 连续被系统拒绝的次数
     done_rejects = 0   # done 被防幻觉复核驳回的次数（上限 2）
     scroll_streak = 0  # 连续滚动/滑动次数（迷路检测：≥6 次强制升级）
+    last_sw_sig, sw_repeat = None, 0  # 连续相同滑动检测（≥3 软提醒，≥7 硬阻断）
     login_warned = False  # 登录页提示只发一次
 
     print("[agent] task: %s" % task)
@@ -1035,6 +1130,34 @@ def main():
     except Exception as e:
         print("[agent] 应用列表加载失败（跳过包名矫正）: %r" % (e,))
     related_apps = match_apps_for_task(task, apps)
+    # —— 开工前规划：qwen 先理解任务（纠同音字）+ 从清单选目标 App + 列计划（2026-09-24 新增） ——
+    plan = None
+    try:
+        plan = qwen_plan(task, apps)
+    except Exception as e:
+        print("[agent] 规划阶段失败（跳过）: %r" % (e,))
+    if plan:
+        print("[agent] 任务理解: %s" % ((plan.get("intent") or "-")[:120]))
+        if plan.get("app_package"):
+            print("[agent] 目标应用: %s(%s)" % (plan.get("app_label"), plan["app_package"]))
+        else:
+            print("[agent] 目标应用: 本机未安装（备用方案: %s）" % ((plan.get("fallback") or "-")[:80]))
+        if plan.get("plan"):
+            print("[agent] 计划: %s" % " → ".join(str(s) for s in plan["plan"][:8]))
+        tracer.log(0, "result", "规划: " + json.dumps(plan, ensure_ascii=False)[:600])
+        if plan.get("app_package"):
+            if all(ra.get("package") != plan["app_package"] for ra in related_apps):
+                related_apps = [{"label": plan.get("app_label") or plan["app_package"],
+                                 "package": plan["app_package"]}] + related_apps
+        else:
+            fb = str(plan.get("fallback") or "")
+            if any(w in fb for w in ("浏览器", "网页", "网站", "搜索")):
+                for a in apps:
+                    if str(a.get("label") or "") == "浏览器":
+                        if all(ra.get("package") != a.get("packageName") for ra in related_apps):
+                            related_apps = related_apps + [{"label": a.get("label"),
+                                                            "package": a.get("packageName")}]
+                        break
     if related_apps:
         print("[agent] 任务相关应用: %s" % "、".join(
             "%s(%s)" % (ra["label"], ra["package"]) for ra in related_apps))
@@ -1086,13 +1209,13 @@ def main():
         if last_sig is not None:
             changed = (screen_hash != last_hash)
             if last_ok and not changed:
-                if last_sig[0] == "tap":
+                if last_sig[0] in ("tap", "open_app"):
                     no_effect[last_sig] = no_effect.get(last_sig, 0) + 1
-                note = "（系统补充）上一步动作已执行，但屏幕没有任何变化——可能没点中/无效。"
-                if last_sig[0] == "tap" and no_effect.get(last_sig, 0) >= 2:
-                    note += ("该点击已连续 %d 次无效果，请不要再点这里，换一种做法。"
+                note = "（系统补充）上一步动作已执行，但屏幕没有任何变化——可能没生效/无效。"
+                if last_sig[0] in ("tap", "open_app") and no_effect.get(last_sig, 0) >= 2:
+                    note += ("该操作已连续 %d 次无效果，请不要再重复，换一种做法。"
                              % no_effect[last_sig])
-                    tracer.log(step, "result", "无效点击标记: %s" % (last_sig,))
+                    tracer.log(step, "result", "无效操作标记: %s" % (last_sig,))
                 history.append({"role": "user", "content": note})
             elif changed:
                 no_effect.clear()   # 屏幕已变化（加载完成/页面切换）→ 解除全部"无效"标记
@@ -1119,7 +1242,7 @@ def main():
                 pass
         try:
             act, eng, dec_dt, ti = decide(step, task, state, history, engine_now, elems,
-                                          experience, related_apps)
+                                          experience, related_apps, plan)
         except Exception as e:
             print("[step %d] decide error: %r" % (step, e))
             time.sleep(2)
@@ -1141,7 +1264,8 @@ def main():
                 summary = act["answer_text"]
             if not summary and engine_now != "qwen":
                 try:
-                    summary = qwen_summary(task, render_tree(state))
+                    summary = qwen_summary(task, render_tree(state),
+                                           (plan or {}).get("intent") or "")
                 except Exception as e:
                     summary = "(总结生成失败: %r)" % e
             # —— 防幻觉复核：结果须能在屏幕上找到依据（"无法完成"如实报告的直接放行） ——
@@ -1149,7 +1273,8 @@ def main():
             if (summary and done_rejects < 2 and len(screen_text) >= 30
                     and not summary.startswith("无法")):
                 try:
-                    v_ok, v_reason = qwen_verify(task, summary, screen_text)
+                    v_ok, v_reason = qwen_verify(task, summary, screen_text,
+                                                 (plan or {}).get("intent") or "")
                 except Exception:
                     v_ok, v_reason = True, ""
                 if not v_ok:
@@ -1172,20 +1297,39 @@ def main():
             if exec_log:
                 save_experience(task, summary, exec_log, mode)
                 print("[agent] 经验已保存: %d 步 → ~/bridge/skills/examples.json" % len(exec_log))
-                try:
-                    learn_app_hint(task, exec_log, state)
-                except Exception:
-                    pass
+                if not (summary or "").startswith("无法"):
+                    try:
+                        learn_app_hint(task, exec_log, state, apps)
+                    except Exception:
+                        pass
             return 0
 
         # —— 重复失败/无效动作硬阻断（连续失败 ≥2 或连续无效果 ≥2 → 拒绝执行，逼模型换策略） ——
         sig = Progress.sig_of(act)
-        blocked = sig is not None and (fail_counts.get(sig, 0) >= 2
-                                       or no_effect.get(sig, 0) >= 2)
+        # 连续相同滑动检测（任意引擎）：≥3 软提醒，≥7 硬阻断（治"同一滑动刷 15 次"的迷路）
+        sw_sig = None
+        if a == "swipe":
+            sw_sig = ("swipe", int(act.get("x1", 0)) // 16, int(act.get("y1", 0)) // 16,
+                      int(act.get("x2", 0)) // 16, int(act.get("y2", 0)) // 16)
+        elif a == "scroll":
+            sw_sig = ("scroll", (act.get("direction") or "down").lower())
+        if sw_sig is not None and sw_sig == last_sw_sig:
+            sw_repeat += 1
+        elif sw_sig is not None:
+            last_sw_sig, sw_repeat = sw_sig, 1
+        else:
+            last_sw_sig, sw_repeat = None, 0
+        sw_blocked = sw_sig is not None and sw_repeat >= 7
+        blocked = (sig is not None and (fail_counts.get(sig, 0) >= 2
+                                        or no_effect.get(sig, 0) >= 2)) or sw_blocked
         if blocked:
             ok = False
-            exec_err = "该动作已连续多次失败/无效果（很可能无效/目标不存在）"
-            print("[step %d] BLOCK 重复失败动作: %s" % (step, sig))
+            if sw_blocked:
+                exec_err = "相同滑动已连续 %d 次未到达目标" % sw_repeat
+                print("[step %d] BLOCK 滑动迷路: %s" % (step, sw_sig))
+            else:
+                exec_err = "该动作已连续多次失败/无效果（很可能无效/目标不存在）"
+                print("[step %d] BLOCK 重复失败动作: %s" % (step, sig))
         else:
             try:
                 if a == "tap":
@@ -1214,7 +1358,11 @@ def main():
                     real = resolve_package(want, apps)
                     if apps and real is None:
                         ok = False
-                        exec_err = "本机未找到应用「%s」（已核对全部已安装应用）" % want
+                        exec_err = ("本机未安装该应用（包名 %s 不存在，已核对全部已安装应用；"
+                                    "不要臆造包名）" % want)
+                        if related_apps:
+                            exec_err += "。可用的相关应用：" + "、".join(
+                                "%s(%s)" % (ra["label"], ra["package"]) for ra in related_apps)
                         print("[step %d] open_app 解析失败: %s" % (step, want))
                     else:
                         if real and real != want:
@@ -1255,9 +1403,14 @@ def main():
             if related_apps and a == "open_app":
                 extra = " 本机可用的相关应用：" + "、".join(
                     "%s(%s)" % (ra["label"], ra["package"]) for ra in related_apps) + "。"
-            msg = ("上一步没有执行：动作 %s 已被系统拒绝（连续失败/无效果）。"
-                   "请换一种完全不同的做法（换应用/换入口/用搜索），不要重复同一动作。%s"
-                   % (json.dumps(act, ensure_ascii=False)[:140], extra))
+            if sw_blocked:
+                msg = ("上一步没有执行：相同的滑动已连续 %d 次，屏幕仍未到达目标。"
+                       "请停止滑动，改用其他方法（按返回键、点击页面导航/按钮、换入口或换 App）。"
+                       % sw_repeat)
+            else:
+                msg = ("上一步没有执行：动作 %s 已被系统拒绝（连续失败/无效果）。"
+                       "请换一种完全不同的做法（换应用/换入口/用搜索），不要重复同一动作。%s"
+                       % (json.dumps(act, ensure_ascii=False)[:140], extra))
             if block_streak >= 3:
                 msg += ("（系统警告：该动作已被连续拒绝 %d 次，坐标已禁用）"
                         "若你认为任务所需的答案已经显示在屏幕上，请立即输出 done 并在 summary 给出答案；"
@@ -1268,6 +1421,12 @@ def main():
             history.append({"role": "user", "content":
                             "上一步动作执行%s%s。" % ("成功" if ok else "失败",
                                                       ("：" + exec_err) if (not ok and exec_err) else "")})
+            if sw_sig is not None and sw_repeat >= 4:
+                history.append({"role": "user", "content":
+                                "（系统补充）你已连续 %d 次相同的滑动。若屏幕内容仍在按预期滚动、"
+                                "接近目标，可以继续；若反复滑动但内容没有实质变化，"
+                                "请立即停止滑动，改用其他方法（按返回键、点击页面上的导航按钮、"
+                                "换入口或换 App）。" % sw_repeat})
 
         flags = prog.note(act, ok, screen_hash)
         if flags:
