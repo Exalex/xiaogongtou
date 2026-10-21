@@ -16,3 +16,14 @@ apk/
 __pycache__/
 *.pyc
 *.trace.jsonl
+
+# 设备备份（含 fpinfo/persist 序列号、MAC、校准 —— 泄露=设备可被克隆）
+backup/
+*.bin
+*.img
+fpinfo_*
+
+# 刷机工作目录
+flash-work/
+patch_work/
+fpinfo_work/
