@@ -340,6 +340,41 @@ def collect_elements(state, limit=110, drop_status_bar=True):
     return out
 
 
+def percept_coverage(elems):
+    """感知覆盖度自检（2026-10-22 新增）。
+
+    背景（酷安 T1 实测）：横屏下酷安是浮层/双栏布局，a11y 树只暴露其中一栏
+    （实测 X 覆盖 658..1502 / 屏宽 2160 = 39%）。模型不知道自己在"半屏"，
+    就拿记忆里的旧坐标往树外区域点 → 点空 → 反复重试。
+
+    做法：把"可见范围只占屏幕多少"直接写进提示词，让模型知道边界。
+    """
+    try:
+        if not elems or not _SCREEN["w"] or not _SCREEN["h"]:
+            return ""
+        xs = [e[1] for e in elems if isinstance(e[1], int)]
+        ys = [e[2] for e in elems if isinstance(e[2], int)]
+        if len(xs) < 4:
+            return ""
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        SW, SH = _SCREEN["w"], _SCREEN["h"]
+        cw = (x1 - x0) / float(SW)
+        ch = (y1 - y0) / float(SH)
+        parts = []
+        if cw < 0.72:
+            parts.append("横向只看到 x=%d..%d（约占屏宽 %.0f%%）" % (x0, x1, cw * 100))
+        if ch < 0.55:
+            parts.append("纵向只看到 y=%d..%d（约占屏高 %.0f%%）" % (y0, y1, ch * 100))
+        if not parts:
+            return ""
+        return ("\n\n【感知边界·重要】%s。范围外的区域没有任何元素信息，"
+                "禁止凭印象点那里的坐标（点空会浪费步数）；"
+                "要操作范围外内容，先用返回键/滚动把目标移进可见范围。" % "；".join(parts))
+    except Exception:
+        return ""
+
+
 def render_elems(elems):
     """补充后的元素清单（portal + 桥树）→ LLM 友好文本（qwen 与 jev 共用同一"事实来源"）。
 
@@ -1631,8 +1666,29 @@ def resolve_package(want, apps):
 
 
 def match_apps_for_task(task, apps, limit=3):
-    """从任务文本里找相关应用（label 子串匹配；同 label 保留包名最短的，更可能是主 App）。"""
+    """从任务文本里找相关应用（label 子串匹配）。
+
+    2026-10-22 修正（平板实测）：原逻辑"同 label 保留包名最短的"在 Pad 上是错的。
+    案例：哔哩哔哩(task 里只写了这四个字)会命中 `tv.danmaku.bili`（手机版，**强制登录**），
+    而真正该用的是 `tv.danmaku.bilibilihd`（HD 版，免登录可浏览）。
+    修正：① 允许"同族变体"（label 以命中标签为前缀，如 哔哩哔哩HD ⊃ 哔哩哔哩）参与候选；
+          ② 大屏/横屏设备上给 HD / Pad / 平板 变体加权，优先选它。
+    """
     t = re.sub(r"\s+", "", task or "").lower()
+    tablet = False
+    try:
+        tablet = bool(_SCREEN["w"]) and _SCREEN["w"] >= 1600 and _SCREEN["w"] >= _SCREEN["h"]
+    except Exception:
+        pass
+
+    def hd_score(label, pkg):
+        """越大越优先：HD/Pad 变体在平板上更合适。"""
+        s = 0
+        blob = (label + " " + pkg).lower()
+        if any(k in blob for k in ("hd", "pad", "tablet", "平板")):
+            s += 3 if tablet else 1
+        return s
+
     hits = []
     for a in apps:
         label = str(a.get("label") or "").strip()
@@ -1641,10 +1697,18 @@ def match_apps_for_task(task, apps, limit=3):
             continue
         lab = re.sub(r"\s+", "", label).lower()
         if len(lab) >= 2 and lab in t:
-            hits.append((len(lab), len(pkg), label, pkg))
-    hits.sort(key=lambda x: (-x[0], x[1]))
+            hits.append((len(lab), len(pkg), label, pkg, hd_score(label, pkg), True))
+            continue
+        # 同族变体：任务里写的短名是本 label 的前缀（哔哩哔哩 ⊂ 哔哩哔哩hd）
+        if len(lab) >= 4:
+            for cut in range(len(lab) - 1, 3, -1):
+                if lab[:cut] in t and lab[cut:] in ("hd", "pad", "平板", "hd版"):
+                    hits.append((cut, len(pkg), label, pkg, hd_score(label, pkg), False))
+                    break
+    # 排序：变体优先度(-) > 标签吻合长度(-) > 包名长度(+)；再取前 limit
+    hits.sort(key=lambda x: (-x[4], -x[0], x[1]))
     out, seen_pkg, seen_label = [], set(), set()
-    for _, _, label, pkg in hits:
+    for _, _, label, pkg, _s, _exact in hits:
         if pkg in seen_pkg or label in seen_label:
             continue
         seen_pkg.add(pkg)
@@ -1882,6 +1946,49 @@ def _script_read_text(t, portal, dy=30):
 DISMISS_EXACT_LOW = ("关闭", "取消", "暂不", "以后")
 DISMISS_PHRASES = ("跳过", "以后再说", "稍后再说", "暂不更新", "不更新",
                    "下次再说", "我知道了", "知道了")
+
+# 权限弹窗（2026-10-22 新增）：酷安实测会连续弹出「获取设备信息」「拨打电话」两个系统
+# 权限框，模型看不懂就去点「允许」——既误授权又把任务带偏。
+# 策略：只要能同时看到「允许」和一个拒绝类按钮，就确定地点击拒绝（不花 token、不误授权）。
+PERM_ALLOW_HINTS = ("允许", "总是允许", "仅在使用中允许", "始终允许")
+PERM_DENY_EXACT = ("拒绝", "不允许", "禁止", "暂不允许", "以后", "稍后", "取消",
+                   "拒绝并退出", "暂不", "不许", "否")
+PERM_DIALOG_HINTS = ("权限", "permission", "获取", "访问", "允许", "授权")
+
+
+def _deny_permission_dialog(portal, elems, tracer=None):
+    """自动拒绝系统/App 权限弹窗。返回点掉的个数（0/1）。
+
+    判定条件（必须同时成立，避免误伤正常界面）：
+      1. 存在标题类文本含「权限/授权/访问」字样
+      2. 同时存在「允许」类按钮和「拒绝」类按钮
+    """
+    try:
+        texts = [(e[3] or "").strip() for e in elems]
+        joined = " ".join(texts)
+        if not any(h in joined for h in PERM_DIALOG_HINTS):
+            return 0
+        has_allow = any(any(h in t for h in PERM_ALLOW_HINTS) and len(t) <= 10 for t in texts if t)
+        if not has_allow:
+            return 0
+        hit = None
+        for e in elems:
+            if not e[4]:
+                continue
+            s = (e[3] or "").strip()
+            if s in PERM_DENY_EXACT:
+                hit = e
+                break
+        if not hit:
+            return 0
+        portal.tap(int(hit[1]), int(hit[2]))
+        print("[agent] 权限弹窗 → 自动拒绝：%s (%d,%d)" % (hit[3], hit[1], hit[2]))
+        if tracer:
+            tracer.log(0, "result", "权限弹窗自动拒绝: %s" % hit[3])
+        time.sleep(0.9)
+        return 1
+    except Exception:
+        return 0
 
 
 def _dismiss_popups(portal, elems, tracer=None, max_n=2):
@@ -2354,10 +2461,11 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
                                    "横屏" if _SCREEN["w"] > _SCREEN["h"] else "竖屏"))
     except Exception:
         pass
-    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s%s\n\n"
+    coverage_note = percept_coverage(elems)
+    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s%s%s\n\n"
             "请输出下一步动作 JSON（点元素优先用 pick 报编号）。"
             % (task, plan_block, goal_block, page_note, step, screen,
-               exp_block, app_hint, app_note, screen_size_note))
+               exp_block, app_hint, app_note, screen_size_note, coverage_note))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-10:] + \
                [{"role": "user", "content": user}]
     reply = call_llm(messages)
@@ -2456,6 +2564,8 @@ def main():
     exec_log = []
     fail_counts = {}   # 动作签名 -> 连续失败次数（>=2 硬阻断）
     no_effect = {}     # tap 签名 -> 连续"屏幕无变化"次数（>=2 视为无效点击）
+    blind_taps = [0]   # 盲点点击计数（坐标附近无任何元素）
+    fg_miss = [0]      # 目标 App 连续不在前台的步数（>=2 触发确定性拉起）
     last_sig, last_ok, last_hash = None, None, None
     last_pick = ""     # 上一步 tap 的目标文字（用于标记失效的经验坐标）
     block_streak = 0   # 连续被系统拒绝的次数
@@ -2791,6 +2901,74 @@ def main():
             cur_pkg = _pkg2
             _LAST_PKG[0] = cur_pkg
             print("[agent] 唤醒成功，前台=%s，继续执行" % cur_pkg)
+        # —— 目标 App 失联自愈（2026-10-22 新增）——
+        #    实测（B站 T1）：open_app 之后前台仍不是目标 App（启动广告/登录墙/被系统切走），
+        #    模型会连续好几步问"我是不是在控制台界面"，白白烧步数。
+        #    规则：连续 2 步的目标 App 不在前台 → 确定性 force-stop + 拉起 + 等 3 秒。
+        try:
+            _tgt_pkg = (plan or {}).get("app_package") or ""
+            if _tgt_pkg and cur_pkg and not str(cur_pkg).startswith("(") and cur_pkg != _tgt_pkg:
+                fg_miss[0] += 1
+            else:
+                fg_miss[0] = 0
+            if fg_miss[0] >= 2:
+                fg_miss[0] = 0
+                print("[agent] 目标 App(%s) 连续不在前台（当前 %s）→ 确定性拉起"
+                      % (_tgt_pkg, cur_pkg))
+                tracer.log(step, "result", "目标失联→拉起 %s" % _tgt_pkg)
+                try:
+                    subprocess.run(["/system/bin/sh", "-c", "am force-stop %s" % _tgt_pkg],
+                                   capture_output=True, timeout=15)
+                except Exception:
+                    pass
+                time.sleep(1.0)
+                try:
+                    portal.open_app(_tgt_pkg)
+                except Exception:
+                    try:
+                        subprocess.run(["/system/bin/sh", "-c",
+                                        "monkey -p %s -c android.intent.category.LAUNCHER 1"
+                                        % _tgt_pkg], capture_output=True, timeout=20)
+                    except Exception:
+                        pass
+                time.sleep(3.5)
+                _st4 = None
+                try:
+                    _st4 = portal.get_state()
+                except Exception:
+                    pass
+                if _st4:
+                    state = _st4
+                    elems = collect_elements(_st4)
+                    try:
+                        cur_pkg = ((_st4.get("phone_state") or {}).get("packageName")
+                                   or cur_pkg)
+                    except Exception:
+                        pass
+                    print("[agent] 拉起后前台=%s，元素 %d" % (cur_pkg, len(elems)))
+        except Exception as _e_fg:
+            print("[step %d] 目标失联自愈异常（跳过）: %r" % (step, _e_fg))
+        # —— 权限弹窗处理（2026-10-22 新增，确定性规则、不花 token）——
+        #    酷安实测会连续弹「获取设备信息」「拨打电话」，模型会去点「允许」（误授权+带偏任务）。
+        #    这里在交给模型决策之前就直接点「拒绝」。
+        try:
+            for _pn in range(2):
+                if not _deny_permission_dialog(portal, elems, tracer):
+                    break
+                _st_p = None
+                try:
+                    _st_p = portal.get_state()
+                except Exception:
+                    pass
+                if _st_p:
+                    elems = collect_elements(_st_p)
+                    state = _st_p
+                else:
+                    break
+            else:
+                pass
+        except Exception as _e_p:
+            print("[step %d] 权限弹窗处理异常（跳过）: %r" % (step, _e_p))
         # —— 登录提示处理（**不早停**）：先关掉继续用；反复出现才叫人来登录 ——
         #   2026-10-12 用户口径：很多 App 只是"弹一下"登录，关掉就能继续；一看到就停是错的。
         if SL is not None and DISPLAY == 0:
@@ -3199,6 +3377,24 @@ def main():
                 _rp2 = label_at(elems, act.get("x", -1), act.get("y", -1))
                 if _rp2:
                     act["_pick_label"] = _rp2
+
+        # —— 盲点拦截（2026-10-22 新增）——
+        #    实测（酷安 T1）：模型会凭"记忆里的布局"报一个坐标，而该坐标附近
+        #    在当前元素清单里根本没有元素 → 点是空白 → 什么也不发生 → 再点一次。
+        #    这里当场记下并告警，不等 3 步"无进展"才发现。
+        if a == "tap" and not act.get("_pick_label"):
+            _bx, _by = act.get("x", -1), act.get("y", -1)
+            _near = label_at(elems, _bx, _by, tol=70)
+            if not _near:
+                blind_taps[0] += 1
+                _cov = percept_coverage(elems)
+                _hint = ("（系统警告）你刚点的坐标 (%d,%d) 附近**没有任何元素**，"
+                         "点下去不会触发任何东西。请从上面的元素清单里用 pick 报编号来点击；"
+                         "如果目标元素不在清单里，说明它不在当前可见范围内，先返回/滚动。" % (_bx, _by))
+                history.append({"role": "user", "content": _hint})
+                print("[step %d] 盲点点击 (%d,%d) 无邻近元素 → 已告警（累计 %d 次）"
+                      % (step, _bx, _by, blind_taps[0]))
+                tracer.log(step, "result", "盲点点击 (%d,%d)" % (_bx, _by))
 
         # —— 重复失败/无效动作硬阻断（连续失败 ≥2 或连续无效果 ≥2 → 拒绝执行，逼模型换策略） ——
         sig = Progress.sig_of(act)
