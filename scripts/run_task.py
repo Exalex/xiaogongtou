@@ -99,7 +99,7 @@ def main():
         if step != last_step:
             last_step = step
             print("  [+%3ds] %s step=%s" % (int(time.time() - t0), state, step), flush=True)
-        if state != "running":
+        if state in ("done", "failed", "idle"):
             break
     else:
         state = "timeout"

@@ -3003,6 +3003,34 @@ def main():
             cur_pkg = _pkg2
             _LAST_PKG[0] = cur_pkg
             print("[agent] 唤醒成功，前台=%s，继续执行" % cur_pkg)
+        # —— 感知边界注入前：元素过少先等待重读（2026-10-22 新增）——
+        #    实测（B站 T3）：点击 tab 后页面在加载骨架屏，a11y 树只剩 0-3 个元素，
+        #    模型看到空清单就开始编「当前在助手控制台页面」→ 后面 10 多步全废。
+        #    改为：元素 <5 时先等 1.2s 重读，最多 3 次；仍空才带着明确提示交给模型。
+        try:
+            _low = 0
+            while len(elems) < 5 and _low < 3:
+                _low += 1
+                print("[step %d] 元素过少（%d）→ 等待 %.1fs 重读（%d/3）"
+                      % (step, len(elems), 1.2 * _low, _low))
+                time.sleep(1.2 * _low)
+                _st_r = None
+                try:
+                    _st_r = portal.get_state()
+                except Exception:
+                    pass
+                if _st_r:
+                    state = _st_r
+                    elems = collect_elements(_st_r)
+                    try:
+                        cur_pkg = ((_st_r.get("phone_state") or {}).get("packageName")
+                                   or cur_pkg)
+                    except Exception:
+                        pass
+            if len(elems) < 5:
+                print("[step %d] 重读后仍只有 %d 个元素（可能仍在加载）" % (step, len(elems)))
+        except Exception as _e_low:
+            print("[step %d] 低元素重读异常（跳过）: %r" % (step, _e_low))
         # —— 已知锚点注入（2026-10-22）：a11y 读不到的自绘入口（如 B站HD 搜索栏）
         #    以虚拟元素形式并入清单，模型可直接 pick，不用猜坐标。
         try:
@@ -3496,6 +3524,35 @@ def main():
             if _rp:
                 act["x"], act["y"] = _rp[0], _rp[1]
                 act["_pick_label"] = _rp[2]
+                # —— pick 索引纠偏（2026-10-22 新增，v2 修正）——
+                #    实测（B站 T3）：模型 pick=2 想点「热门」，实际索引 2 是「推荐」（偏一位）。
+                #    v1 用"整串标签是否出现在 thought"判定，踩坑：a11y 的复合标签是
+                #    `热门,5之3,标签`，thought 里只写「热门」→ 被判"不匹配"→ 反而改点成「首页」。
+                #    v2 改为**词元匹配**：把标签按分隔符拆段，任一段（≥2字）出现在 thought 即算命中。
+                try:
+                    import re as _re_pc
+
+                    def _hit(lab, th):
+                        parts = _re_pc.split(r"[,，|/、\s]+", str(lab or ""))
+                        return any(len(p) >= 2 and p in th for p in parts)
+
+                    _th = str(act.get("thought") or "")
+                    _picked = str(_rp[2] or "")
+                    if _th and _picked and not _hit(_picked, _th):
+                        _cands = [e for e in elems
+                                  if e[3] and str(e[3]) != _picked and _hit(str(e[3]), _th)]
+                        if len(_cands) == 1:
+                            _best = _cands[0]
+                            act["x"], act["y"] = _best[1], _best[2]
+                            act["_pick_label"] = str(_best[3])
+                            print("[step %d] pick 索引纠偏: %r → %r（以 thought 里的标签为准）"
+                                  % (step, _picked, _best[3]))
+                            tracer.log(step, "result", "索引纠偏 %r→%r" % (_picked, _best[3]))
+                        elif len(_cands) > 1:
+                            print("[step %d] 索引纠偏跳过：thought 命中 %d 个候选，无法确定"
+                                  % (step, len(_cands)))
+                except Exception as _e_pc:
+                    print("[step %d] 索引纠偏跳过: %r" % (step, _e_pc))
             else:
                 _rp2 = label_at(elems, act.get("x", -1), act.get("y", -1))
                 if _rp2:
