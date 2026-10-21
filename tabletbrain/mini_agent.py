@@ -327,7 +327,13 @@ def collect_elements(state, limit=110, drop_status_bar=True):
         desc = (node.get("contentDescription") or "").strip()
         label = text if text else desc
         clickable = bool(node.get("isClickable") or node.get("isLongClickable") or node.get("isEditable"))
+        editable = bool(node.get("isEditable"))
         b = node.get("boundsInScreen") or {}
+        # 2026-10-22：**可编辑但没有文字的输入框也要收**。
+        # 实测（B站HD 搜索页）：AutoCompleteTextView 有 isEditable 但 text 为空，
+        # 被原逻辑过滤掉 → 模型认为"页面没有输入框"，只会反复点搜索栏，永远走不到 input_text。
+        if not label and editable:
+            label = "【输入框】"
         if label and isinstance(b, dict) and b:
             cx = (b.get("left", 0) + b.get("right", 0)) // 2
             cy = (b.get("top", 0) + b.get("bottom", 0)) // 2
@@ -338,6 +344,54 @@ def collect_elements(state, limit=110, drop_status_bar=True):
 
     visit(state.get("a11y_tree") or {})
     return out
+
+
+APP_ANCHORS_FILE = os.path.expanduser("~/bridge/skills/app_anchors.json")
+_APP_ANCHORS = [None]
+
+
+def app_anchors(pkg):
+    """按包名取"已知固定入口"坐标（归一化 0-1000）。
+
+    为什么需要（2026-10-22 实测）：哔哩哔哩HD 的搜索栏是**自绘控件**，
+    a11y 树里完全没有它（实测 82 个元素，只有 tab 和视频卡片）。
+    任何"搜索"类任务都卡在"找不到搜索入口"上，模型只能瞎猜坐标。
+
+    这类入口位置是**版本内稳定的**，记一次就能反复用 —— 存成锚点，
+    注入成虚拟元素给模型（可 pick、可点），是"a11y 读不到"这一类问题的通用解。
+    """
+    global _APP_ANCHORS
+    if _APP_ANCHORS[0] is None:
+        try:
+            with open(APP_ANCHORS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            _APP_ANCHORS[0] = d if isinstance(d, dict) else {}
+        except Exception:
+            _APP_ANCHORS[0] = {}
+    return _APP_ANCHORS[0].get(pkg) or {}
+
+
+def inject_anchor_elems(elems, pkg):
+    """把已知锚点并入元素清单（虚拟元素，label 带【锚点】前缀）。"""
+    try:
+        anc = app_anchors(pkg)
+        if not anc or not _SCREEN["w"] or not _SCREEN["h"]:
+            return elems
+        out = list(elems)
+        n = len(out)
+        for name, xy in anc.items():
+            if not isinstance(xy, (list, tuple)) or len(xy) != 2:
+                continue
+            label = "【锚点】%s" % name
+            if any(label in str(e[3]) for e in out):
+                continue
+            x = int(float(xy[0]) / 1000.0 * _SCREEN["w"])
+            y = int(float(xy[1]) / 1000.0 * _SCREEN["h"])
+            out.append((n, x, y, label, True))
+            n += 1
+        return out
+    except Exception:
+        return elems
 
 
 def percept_coverage(elems):
@@ -2462,10 +2516,36 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
     except Exception:
         pass
     coverage_note = percept_coverage(elems)
-    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s%s%s\n\n"
+    # —— 输入状态提示（2026-10-22 新增）——
+    #    实测（B站HD 搜索页）：键盘已弹出、光标已在输入框内，模型却坚持"再点一次搜索框确保聚焦"，
+    #    连点 6 次被判无效。原因是没人告诉它"现在可以直接打字"。
+    input_note = ""
+    try:
+        _ps = (state.get("phone_state") or {})
+        _kb = bool(_ps.get("keyboardVisible"))
+        _ed = bool(_ps.get("isEditable"))
+        _fe = _ps.get("focusedElement") or {}
+        _fe_hint = ""
+        try:
+            if isinstance(_fe, dict):
+                _fe_hint = str(_fe.get("text") or _fe.get("className") or "")[:30]
+        except Exception:
+            _fe_hint = ""
+        if _kb:
+            input_note = ("\n\n【输入状态·重要】软键盘已弹出，光标已经在输入框里%s。"
+                          "**不要再点输入框了**，直接输出 "
+                          "{\"action\":\"input_text\",\"text\":\"要输入的内容\"}；"
+                          "输入完成后用 {\"action\":\"key\",\"key_code\":66}（回车）提交搜索。"
+                          % (("（%s）" % _fe_hint) if _fe_hint else ""))
+        elif _ed:
+            input_note = ("\n\n【输入状态】当前有可编辑输入框但键盘未弹出，"
+                          "先 tap 那个【输入框】元素，再 input_text。")
+    except Exception:
+        input_note = ""
+    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s%s%s%s\n\n"
             "请输出下一步动作 JSON（点元素优先用 pick 报编号）。"
             % (task, plan_block, goal_block, page_note, step, screen,
-               exp_block, app_hint, app_note, screen_size_note, coverage_note))
+               exp_block, app_hint, app_note, screen_size_note, coverage_note, input_note))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-10:] + \
                [{"role": "user", "content": user}]
     reply = call_llm(messages)
@@ -2613,6 +2693,28 @@ def main():
     except Exception as e:
         print("[agent] 规划阶段失败（跳过）: %r" % (e,))
     if plan:
+        # —— 平板变体纠正（2026-10-22 实测驱动）——
+        #    规划器是独立 LLM 调用，仍会挑手机版（如 tv.danmaku.bili 强制登录），
+        #    而当前设备上存在 HD/Pad 变体（tv.danmaku.bilibilihd 免登录可浏览）。
+        #    这里做一次确定性纠正：若 plan 选中的包名有 HD/Pad 同族变体，改用它。
+        try:
+            _pp = str(plan.get("app_package") or "")
+            if _pp:
+                _sib = [ra for ra in related_apps
+                        if ra.get("package") != _pp
+                        and any(k in (str(ra.get("package", "")) + str(ra.get("label", ""))).lower()
+                                for k in ("hd", "pad", "tablet", "平板"))]
+                _is_tab = bool(_SCREEN["w"]) and _SCREEN["w"] >= 1600 and _SCREEN["w"] >= _SCREEN["h"]
+                _cur_hd = any(k in _pp.lower() for k in ("hd", "pad", "tablet"))
+                if _sib and _is_tab and not _cur_hd:
+                    _new = _sib[0]
+                    print("[agent] 平板变体纠正: %s(%s) → %s(%s)"
+                          % (plan.get("app_label"), _pp, _new.get("label"), _new.get("package")))
+                    tracer.log(0, "result", "平板变体纠正 %s→%s" % (_pp, _new.get("package")))
+                    plan["app_package"] = _new.get("package")
+                    plan["app_label"] = _new.get("label")
+        except Exception as _e_corr:
+            print("[agent] 平板变体纠正异常（跳过）: %r" % (_e_corr,))
         print("[agent] 任务理解: %s" % ((plan.get("intent") or "-")[:120]))
         if plan.get("app_package"):
             print("[agent] 目标应用: %s(%s)" % (plan.get("app_label"), plan["app_package"]))
@@ -2901,6 +3003,17 @@ def main():
             cur_pkg = _pkg2
             _LAST_PKG[0] = cur_pkg
             print("[agent] 唤醒成功，前台=%s，继续执行" % cur_pkg)
+        # —— 已知锚点注入（2026-10-22）：a11y 读不到的自绘入口（如 B站HD 搜索栏）
+        #    以虚拟元素形式并入清单，模型可直接 pick，不用猜坐标。
+        try:
+            if cur_pkg and not str(cur_pkg).startswith("("):
+                _before = len(elems)
+                elems = inject_anchor_elems(elems, cur_pkg)
+                if len(elems) > _before:
+                    print("[step %d] 注入 App 锚点 %d 个（%s）"
+                          % (step, len(elems) - _before, cur_pkg))
+        except Exception as _e_anc:
+            print("[step %d] 锚点注入异常（跳过）: %r" % (step, _e_anc))
         # —— 目标 App 失联自愈（2026-10-22 新增）——
         #    实测（B站 T1）：open_app 之后前台仍不是目标 App（启动广告/登录墙/被系统切走），
         #    模型会连续好几步问"我是不是在控制台界面"，白白烧步数。
