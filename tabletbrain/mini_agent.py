@@ -3360,16 +3360,26 @@ def main():
             if not summary and act.get("answer_text"):
                 summary = act["answer_text"]
             # 榜单单条任务（"第N条"）：累积数据足以确定名次 → 以系统确定答案为准（防模型猜错）
+            # 2026-10-22 修高危 bug：原逻辑只匹配"第N个/条/名/位"，于是
+            # **"打开第一个视频"** 也被当成榜单任务，系统把模型已答对的内容
+            # （《萌猫大集合》/喵星cat人/62.2万）覆盖成了无关的"悲伤汇成海洋"。
+            # 修正：必须任务本身带**排行榜语义**才允许系统覆盖。
+            RANK_TASK_WORDS = ("排行", "榜单", "热搜", "排名", "榜上", "热榜", "第几",
+                               "前几", "前三", "前3", "前五", "前5", "前十", "前10")
             sys_locked = False
             try:
+                _rank_task = any(w in (task or "") for w in RANK_TASK_WORDS) or \
+                    any(w in ((plan or {}).get("intent") or "") for w in RANK_TASK_WORDS)
                 m_nth = re.search(r"第\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[条名位个]", task or "")
-                if m_nth:
+                if m_nth and _rank_task:
                     _n2 = _cn2int(m_nth.group(1))
                     _sys = rank_nth(rank_acc, _n2)
                     if _sys:
                         summary = "第 %d 条是：%s" % (_n2, _sys)
                         sys_locked = True
                         print("[agent] 榜单第%d条（系统确定）: %s" % (_n2, _sys[:50]))
+                elif m_nth and not _rank_task:
+                    print("[agent] 跳过榜单覆盖：任务无排行榜语义（'第N个'只是序数，不是排名）")
             except Exception:
                 pass
             # 列表类任务（前N/排行/哪些…）：Jev 的单条选择不算完整答案 → 强制 qwen 汇总全量
