@@ -2696,6 +2696,7 @@ def main():
     no_effect = {}     # tap 签名 -> 连续"屏幕无变化"次数（>=2 视为无效点击）
     blind_taps = [0]   # 盲点点击计数（坐标附近无任何元素）
     fg_miss = [0]      # 目标 App 连续不在前台的步数（>=2 触发确定性拉起）
+    self_overlay = [0]  # 自家浮层（小工头）在前台的次数
     last_sig, last_ok, last_hash = None, None, None
     last_pick = ""     # 上一步 tap 的目标文字（用于标记失效的经验坐标）
     block_streak = 0   # 连续被系统拒绝的次数
@@ -3117,6 +3118,43 @@ def main():
                           % (step, len(elems) - _before, cur_pkg))
         except Exception as _e_anc:
             print("[step %d] 锚点注入异常（跳过）: %r" % (step, _e_anc))
+        # —— 自家浮层抢屏自愈（2026-10-22 实测驱动）——
+        #    实测：小工头 TaskBar（顶部居中 340dp）盖住 B站 顶部标签栏且吃掉点击，
+        #    点「热门」实际打开了小工头对话页 → 模型反复 open_app → 12 步被判动作循环放弃。
+        #    TaskBar 已改为运行中点击穿透；这里再加一道兜底：只要前台变成我们自己，就按返回键退出。
+        try:
+            _SELF_PKGS = ("com.xiaogongtou.entry",)
+            if cur_pkg in _SELF_PKGS:
+                self_overlay[0] += 1
+                if self_overlay[0] <= 3:
+                    print("[step %d] 检测到自家浮层在前台（%s）→ 按返回键退出（%d/3）"
+                          % (step, cur_pkg, self_overlay[0]))
+                    tracer.log(step, "result", "自家浮层抢屏→返回键(%d)" % self_overlay[0])
+                    try:
+                        portal.key(4)
+                    except Exception:
+                        pass
+                    time.sleep(1.2)
+                    _st_ov = None
+                    try:
+                        _st_ov = portal.get_state()
+                    except Exception:
+                        pass
+                    if _st_ov:
+                        state = _st_ov
+                        elems = collect_elements(_st_ov)
+                        try:
+                            cur_pkg = ((_st_ov.get("phone_state") or {}).get("packageName")
+                                       or cur_pkg)
+                        except Exception:
+                            pass
+                else:
+                    print("[step %d] 自家浮层反复出现（%d 次），本轮不再处理"
+                          % (step, self_overlay[0]))
+            else:
+                self_overlay[0] = 0
+        except Exception as _e_ov:
+            print("[step %d] 浮层自愈异常（跳过）: %r" % (step, _e_ov))
         # —— 目标 App 失联自愈（2026-10-22 新增）——
         #    实测（B站 T1）：open_app 之后前台仍不是目标 App（启动广告/登录墙/被系统切走），
         #    模型会连续好几步问"我是不是在控制台界面"，白白烧步数。
