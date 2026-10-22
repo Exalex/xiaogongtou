@@ -868,13 +868,41 @@ class Tracer:
     def __init__(self, path):
         self.path = path
         self.f = None
+        self._t0 = time.time()
+        self._steps = set()
+        self._waste = {}
+        self._llm = []
+        self._pstart = None
+        self._closed = False
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             self.f = open(path, "a", encoding="utf-8")
         except Exception:
             self.f = None
 
+    # 浪费归因表（与 scripts/metrics.py 对齐）
+    _WASTE_MAP = (("执行失败", "执行失败"), ("动作循环", "动作循环"),
+                  ("重复动作", "重复动作"), ("屏幕无变化", "屏幕无变化"),
+                  ("封禁", "坐标封禁"), ("BLOCK", "硬阻断"),
+                  ("盲点点击", "盲点点击"), ("幂等跳过", "幂等跳过"))
+
     def log(self, step, kind, text, **extra):
+        # —— 在线度量（2026-10-22）：任务结束要能直接报"几步/多久/浪费在哪" ——
+        try:
+            if step:
+                self._steps.add(int(step))
+            if kind == "prompt_start":
+                self._pstart = time.time()
+            elif kind == "reply" and self._pstart:
+                self._llm.append(round(time.time() - self._pstart, 2))
+                self._pstart = None
+            elif kind == "result":
+                _t = str(text or "")
+                for pat, cat in self._WASTE_MAP:
+                    if pat in _t:
+                        self._waste[cat] = self._waste.get(cat, 0) + 1
+        except Exception:
+            pass
         if not self.f:
             return
         rec = {"ts": round(time.time(), 2), "step": step, "kind": kind, "text": text}
@@ -886,6 +914,28 @@ class Tracer:
             pass
 
     def close(self):
+        if self.f and not self._closed:
+            self._closed = True
+            try:
+                el = round(time.time() - self._t0, 1)
+                summ = {"steps": len(self._steps), "elapsed": el,
+                        "llm_calls": len(self._llm),
+                        "llm_total": round(sum(self._llm), 1),
+                        "llm_avg": round(sum(self._llm) / len(self._llm), 2) if self._llm else 0,
+                        "waste": self._waste}
+                self.f.write(json.dumps({"ts": round(time.time(), 2),
+                                         "step": max(self._steps) if self._steps else 0,
+                                         "kind": "summary",
+                                         "text": json.dumps(summ, ensure_ascii=False)},
+                                        ensure_ascii=False) + "\n")
+                self.f.flush()
+                print("[agent] 本次度量: %d 步 / %.1fs / 模型 %d 次共 %.1fs(均 %.2fs) / 浪费 %s"
+                      % (summ["steps"], el, summ["llm_calls"], summ["llm_total"],
+                         summ["llm_avg"],
+                         ("、".join("%s×%d" % (k, v) for k, v in self._waste.items())
+                          or "无")))
+            except Exception:
+                pass
         if self.f:
             try:
                 self.f.close()
@@ -2651,6 +2701,10 @@ def main():
     block_streak = 0   # 连续被系统拒绝的次数
     done_rejects = 0   # done 被防幻觉复核驳回的次数（上限 2）
     scroll_streak = 0  # 连续滚动/滑动次数（迷路检测：≥6 次强制升级）
+    scroll_osc = [0]     # 滚动方向来回切换次数（下↔上震荡检测）
+    scroll_last_dir = [""]  # 上一次滚动方向
+    back_up = [0]        # 榜单就绪后允许向上滚回顶部的次数
+    _rn_global = [0]     # 任务要的条数 N（供滚动闸门使用）
     scroll_zone = [0]  # 滚动无效自动换位（2026-10-19 迭代3）：0中央/1左/2右
     prev_hash = None   # 上上步屏幕指纹（判断"连续两次滚动屏幕没变"）
     last_sw_sig, sw_repeat = None, 0  # 连续相同滑动检测（≥3 软提醒，≥7 硬阻断）
@@ -3294,11 +3348,24 @@ def main():
             last_sig = None
         # —— 榜单收集推进："第N条/前N名"任务：数据不足时催促滚动，足够时直接给出名次 ——
         _rn = parse_rank_n(task) or parse_rank_n((plan or {}).get("intent") or "")
+        _rn_global[0] = _rn or 0
         if _rn and step >= 2:
             if len(rank_acc) >= _rn + 2:
                 if not rank_ready:
                     _nth = rank_nth(rank_acc, _rn)
-                    if _nth:
+                    _is_topn = bool(re.search(r"前\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[条名位]",
+                                              (task or "") + " " + ((plan or {}).get("intent") or "")))
+                    if _is_topn:
+                        # "前N条"任务：收集够了就必须收工，禁止继续滚动（实测会震荡 44 步）
+                        history.append({"role": "user", "content":
+                                        "（系统强制）榜单数据已收集足够（%d 条）。**立即停止滚动**，"
+                                        "把前 %d 条标题按序号列出来并输出 done。"
+                                        "缺少的个别条目就用已看到的，不要为了完整性反复来回滚动。"
+                                        % (len(rank_acc), _rn)})
+                        print("[step %d] 榜单收集完成（前%d条）→ 已要求立即作答，此后禁止滚动"
+                              % (step, _rn))
+                        rank_ready = True
+                    elif _nth:
                         history.append({"role": "user", "content":
                                         "（系统提醒）榜单数据已收集足够（%d 条）。按官方顺序（热度降序）"
                                         "第 %d 条是：%s。如果任务就是问这一条，请直接输出 done 并给出该答案。"
@@ -3387,6 +3454,9 @@ def main():
                 print("[step %d] 子目标处理异常（跳过）: %r" % (step, e))
                 goal_text = ""
         try:
+            # 2026-10-22：模型调用**前**打点，才能量出真实推理耗时
+            # （此前 prompt/reply 都在返回后一起写，两个 ts 完全相同 → 度量全是 0）
+            tracer.log(step, "prompt_start", "", engine=engine_now)
             act, eng, dec_dt, ti = decide(step, task, state, history, engine_now, elems,
                                           experience, related_apps, plan, goal_text)
         except Exception as e:
@@ -3431,6 +3501,34 @@ def main():
                     print("[agent] 跳过榜单覆盖：任务无排行榜语义（'第N个'只是序数，不是排名）")
             except Exception:
                 pass
+            # —— "前N条"任务：数据够 → 系统直接组答案（2026-10-22，0 模型成本）——
+            #    实测：模型受屏幕视野限制，只能复述当前屏看到的几条，
+            #    而系统已跨步累积了 31 条（含第 7~10 条）。让模型回忆 = 必然漏条，
+            #    让它凑数 = 拿导航标签填坑。两条都错 → 干脆用累积数据确定性作答。
+            try:
+                _topn = re.search(r"前\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[条名位]",
+                                  (task or "") + " " + ((plan or {}).get("intent") or ""))
+                if _topn and rank_acc and not str(summary or "").startswith("无法"):
+                    _n3 = _cn2int(_topn.group(1))
+                    _NAV = ("微博搜索", "热搜榜", "话题榜", "文娱榜", "要闻榜", "新时代",
+                            "同城榜", "好友搜", "实时热点", "搜索", "登录", "更多")
+                    # rank_acc 的结构是 {title: score} → items() 给出 (title, score)
+                    _pairs = sorted(rank_acc.items(), key=lambda kv: -(kv[1] or 0))
+                    _items = [(sc, ti) for ti, sc in _pairs
+                              if ti and len(str(ti).strip()) >= 4
+                              and not any(str(ti).strip() == w or str(ti).strip().startswith(w)
+                                          for w in _NAV)
+                              and not re.fullmatch(r"[\d\s,.]+", str(ti).strip())]
+                    if _n3 and len(_items) >= _n3:
+                        summary = "前%d条：%s" % (
+                            _n3, "; ".join("%d. %s" % (i + 1, ti)
+                                           for i, (_sc, ti) in enumerate(_items[:_n3])))
+                        sys_locked = True
+                        print("[agent] 用系统累积榜单作答（可选 %d 条，取前 %d）：0 模型成本"
+                              % (len(_items), _n3))
+                        tracer.log(0, "result", "系统累积作答 前%d条（候选%d）" % (_n3, len(_items)))
+            except Exception as _e_topn:
+                print("[agent] 前N条系统作答异常（跳过）: %r" % (_e_topn,))
             # 列表类任务（前N/排行/哪些…）：Jev 的单条选择不算完整答案 → 强制 qwen 汇总全量
             multi = wants_multi_answer(task, plan)
             if ((not summary or len(summary) >= 60 or multi) and engine_now != "qwen"
@@ -3487,6 +3585,32 @@ def main():
                     continue
             # —— 防幻觉复核：结果须能在屏幕上找到依据（"无法完成"如实报告的直接放行） ——
             screen_text = " ".join(e[3] for e in elems)
+            # —— 导航标签黑名单（2026-10-22 实测驱动，确定性、0 模型成本）——
+            #    微博热搜实测：模型把页面 tab（微博搜索/热搜榜/话题榜）当成第 8/9/10 条热搜，
+            #    校验器驳回 2 次后第 3 次用同一个错答案还是过了 → 必须确定性拦住。
+            NAV_LABELS = ("微博搜索", "热搜榜", "话题榜", "文娱榜", "要闻榜", "新时代",
+                          "同城榜", "好友搜", "实时热点", "我的", "发现", "首页", "消息")
+            try:
+                _hits = [w for w in NAV_LABELS if w in (summary or "")]
+                if len(_hits) >= 2 and not (summary or "").startswith("无法"):
+                    done_rejects += 1
+                    v_reason = ("答案里出现 %d 个页面导航标签（%s），这些不是数据条目"
+                                % (len(_hits), "、".join(_hits[:4])))
+                    print("[step %d] DONE 被驳回（导航标签）：%s" % (step, v_reason))
+                    tracer.log(step, "result", "done被驳回(导航标签): %s" % v_reason)
+                    history.append({"role": "user", "content":
+                                    "（系统）你的答案把页面上的导航/标签文字（%s）当成了数据条目。"
+                                    "请只用真正的内容条目作答；缺的条目宁可少报，不要用导航词凑数。"
+                                    % "、".join(_hits[:4])})
+                    if done_rejects >= 3:
+                        print("[agent] 导航标签反复出现 → 停止（不再浪费步数）")
+                        print("[agent] DONE: 无法完成：只读到导航标签，未能可靠提取数据条目")
+                        tracer.log(step, "done", "导航标签反复出现，停止")
+                        tracer.close()
+                        return 0
+                    continue
+            except Exception:
+                pass
             if (summary and done_rejects < 2 and len(screen_text) >= 30
                     and not summary.startswith("无法") and not sys_locked):
                 try:
@@ -3614,6 +3738,39 @@ def main():
             last_sw_sig, sw_repeat = None, 0
         sw_blocked = sw_sig is not None and sw_repeat >= 7
         _fail_lim = 3 if (sig is not None and sig[0] == "open_app") else 2
+        # —— 滚动震荡拦截（2026-10-22 实测驱动）——
+        #    微博热搜实测：数据在第 7 步就收集够了，模型却在"下滚看7-10条 / 上滚看1-4条"
+        #    之间来回震荡 44 步，把 51 步预算全烧光。
+        #    两道闸门：
+        #      ① 榜单数据已够（rank_ready）→ 禁止任何滚动/滑动，必须作答
+        #      ② 方向来回切换 ≥4 次 → 判定震荡，禁止再滚动
+        _is_scroll = a in ("scroll", "swipe")
+        if _is_scroll:
+            _dir = (act.get("direction") or "").lower() if a == "scroll" else ""
+            if _dir and scroll_last_dir[0] and _dir != scroll_last_dir[0]:
+                scroll_osc[0] += 1
+            scroll_last_dir[0] = _dir or scroll_last_dir[0]
+        elif a not in ("wait",):
+            scroll_osc[0] = 0
+        osc_blocked = False
+        if _is_scroll and rank_ready and _rn_global[0]:
+            # 只禁止"往下滚"（越滚越远）；允许一次向上滚回顶部，否则拿不到第 1~5 条
+            _dir2 = (act.get("direction") or "").lower() if a == "scroll" else \
+                ("up" if (act.get("y2", 0) or 0) < (act.get("y1", 0) or 0) else "down")
+            if _dir2 == "up" and back_up[0] < 2:
+                back_up[0] += 1
+                print("[step %d] 允许向上滚回顶部（%d/2）" % (step, back_up[0]))
+            else:
+                osc_blocked = True
+                _osc_msg = ("榜单数据已收集足够（%d 条），**禁止再往下滚**。"
+                            "请立刻输出 {\"action\":\"done\",\"summary\":\"前%d条：...\"}，"
+                            "把已看到的标题按序号列出来；缺的宁可少报，不要用导航词凑数。"
+                            % (len(rank_acc), _rn_global[0]))
+        elif _is_scroll and scroll_osc[0] >= 4:
+            osc_blocked = True
+            _osc_msg = ("你在来回滚动（已 %d 次方向切换）但屏幕内容没有推进。"
+                        "停止滚动，用当前已经拿到的信息作答；如果确实还缺，改成点击具体条目进入。"
+                        % scroll_osc[0])
         # —— 贯穿件 B · 硬闸门（执行前；来自 guards.json，高频错误模式编译而成）——
         guard_blocked, guard_msg = False, ""
         if SW_GUARDS and SL is not None:
@@ -3632,7 +3789,7 @@ def main():
         coord_banned = (sig is not None and sig[0] == "tap" and tap_seen.get(sig, 0) >= 4)
         blocked = (sig is not None and (fail_counts.get(sig, 0) >= _fail_lim
                                         or no_effect.get(sig, 0) >= 2)) \
-            or sw_blocked or guard_blocked or coord_banned
+            or sw_blocked or guard_blocked or coord_banned or osc_blocked
         if blocked:
             ok = False
             if coord_banned:
@@ -3648,6 +3805,11 @@ def main():
             elif sw_blocked:
                 exec_err = "相同滑动已连续 %d 次未到达目标" % sw_repeat
                 print("[step %d] BLOCK 滑动迷路: %s" % (step, sw_sig))
+            elif osc_blocked:
+                exec_err = _osc_msg
+                print("[step %d] BLOCK 滚动震荡: %s" % (step, _osc_msg[:80]))
+                tracer.log(step, "result", "滚动震荡拦截: %s" % _osc_msg[:90])
+                history.append({"role": "user", "content": "（系统强制）" + _osc_msg})
             else:
                 exec_err = "该动作已连续多次失败/无效果（很可能无效/目标不存在）"
                 print("[step %d] BLOCK 重复失败动作: %s" % (step, sig))
@@ -3711,7 +3873,27 @@ def main():
                 elif a == "open_app":
                     want = act.get("package", "")
                     real = resolve_package(want, apps)
-                    if apps and real is None:
+                    # —— open_app 幂等（2026-10-22 实测驱动）——
+                    #    微博任务实测：Chrome 已在前台（显示的是控制台页面），模型反复
+                    #    open_app chrome → 启动无变化 → 被判"重复失败动作"拦 3 次 → 7 步放弃。
+                    #    改为：已在目标 App 前台时不重复启动，直接告知"你已经在里面了，做下一步"。
+                    if real and cur_pkg == real:
+                        ok = True
+                        _idem = ("（系统提示）你已经就在 %s 里了，重复打开不会改变任何东西。"
+                                 "请直接执行下一步（例如点地址栏输入网址、点搜索框输入关键词）。"
+                                 % (act.get("package") or real))
+                        history.append({"role": "user", "content": _idem})
+                        print("[step %d] open_app 幂等跳过：%s 已在前台 → 提示改做下一步"
+                              % (step, real))
+                        tracer.log(step, "result", "open_app 幂等跳过(%s)" % real)
+                        act["action"] = "wait"
+                        a = "wait"
+                        act["seconds"] = 0.3
+                        no_effect.pop(sig, None)   # 幂等跳过不算"点了没效果"
+                        real = None
+                    if real is None:
+                        pass
+                    elif apps and resolve_package(want, apps) is None:
                         ok = False
                         exec_err = ("本机未安装该应用（包名 %s 不存在，已核对全部已安装应用；"
                                     "不要臆造包名）" % want)
