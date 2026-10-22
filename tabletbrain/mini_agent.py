@@ -418,9 +418,23 @@ def load_app_paths():
     return _APP_PATHS[0]
 
 
-def app_path_hint(pkg, task):
-    """按包名 + 任务关键词匹配导航路径，返回提示文本（无匹配返回 ""）。"""
+def app_path_hint(pkg, task, elems=None):
+    """入口路径提示。优先级：自动探索地图 > 手写路径表。
+
+    2026-10-22 接上「App 地图」（用户思路）：空闲时把 App 逛一遍存成地图，
+    任务开工先查地图 —— 直接回答"我在哪、要去的地方怎么走"，
+    不用每条任务都重新认路。地图没有/对不上时退回手写路径表，都没有就不提示。
+    """
     try:
+        # ① 自动地图（有空 screen 识别 + 入口路径）
+        try:
+            import appmap as _am
+            _h = _am.hint_for(pkg, task, elems or [])
+            if _h:
+                return _h
+        except Exception as _e1:
+            print("[agent] App 地图不可用（%r），退回手写路径表" % (_e1,))
+        # ② 手写路径表（兜底）
         paths = (load_app_paths() or {}).get(pkg) or {}
         if not paths:
             return ""
@@ -2629,7 +2643,7 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
     try:
         _pkp = (state.get("phone_state") or {}).get("packageName") or ""
         if _pkp and not str(_pkp).startswith("("):
-            path_note = app_path_hint(_pkp, task)
+            path_note = app_path_hint(_pkp, task, elems)
     except Exception:
         path_note = ""
     # —— 输入状态提示（2026-10-22 新增）——
