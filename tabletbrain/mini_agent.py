@@ -394,6 +394,59 @@ def inject_anchor_elems(elems, pkg):
         return elems
 
 
+APP_PATHS_FILE = os.path.expanduser("~/bridge/skills/app_paths.json")
+_APP_PATHS = [None]
+
+
+def load_app_paths():
+    """App 导航图谱：{包名: {功能名: {keywords:[...], path:[...], note:"..."}}}。
+
+    为什么需要（2026-10-22 三次实测驱动）：
+      · B站HD「排行榜」不在 tab 上，藏在「热门」页里（tab 名与目标名不同）→ 两次失败（29步/12步）
+      · 酷安「搜索」首页没有入口，必须先切到「应用」页才出现搜索框 → 17步失败
+    这类"入口藏在二级页 / 名字对不上"的问题，让模型每步重新推理是低效且不稳的。
+    记一次路径，之后直接告诉它怎么走 —— 这才是"可复用"。
+    """
+    global _APP_PATHS
+    if _APP_PATHS[0] is None:
+        try:
+            with open(APP_PATHS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            _APP_PATHS[0] = d if isinstance(d, dict) else {}
+        except Exception:
+            _APP_PATHS[0] = {}
+    return _APP_PATHS[0]
+
+
+def app_path_hint(pkg, task):
+    """按包名 + 任务关键词匹配导航路径，返回提示文本（无匹配返回 ""）。"""
+    try:
+        paths = (load_app_paths() or {}).get(pkg) or {}
+        if not paths:
+            return ""
+        t = (task or "") + " "
+        lines = []
+        for name, spec in paths.items():
+            if not isinstance(spec, dict):
+                continue
+            kws = spec.get("keywords") or [name]
+            if not any(str(k) in t for k in kws):
+                continue
+            steps = spec.get("path") or []
+            note = str(spec.get("note") or "")
+            if not steps:
+                continue
+            lines.append("· %s：%s%s" % (
+                name, " → ".join(str(s) for s in steps),
+                ("（%s）" % note) if note else ""))
+        if not lines:
+            return ""
+        return ("\n\n【本 App 已知入口路径·优先照此走】\n" + "\n".join(lines) +
+                "\n（这些路径是实测验证过的，比你自己找入口更快；按顺序点即可，不要绕路。）")
+    except Exception:
+        return ""
+
+
 def percept_coverage(elems):
     """感知覆盖度自检（2026-10-22 新增）。
 
@@ -862,6 +915,11 @@ def render_goals(goals, idx):
 
 
 # ---------------------------------------------------------------- 调试 trace
+class _SkipLogin(Exception):
+    """登录引导浮层（非登录墙）：跳过后续登录处理，继续原计划。"""
+    pass
+
+
 class Tracer:
     """每任务一份 jsonl trace（prompt / reply / action / result），供调试浮窗与复盘。"""
 
@@ -2566,6 +2624,14 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
     except Exception:
         pass
     coverage_note = percept_coverage(elems)
+    # —— App 导航图谱提示（2026-10-22）：入口藏在二级页/异名时直接给路径 ——
+    path_note = ""
+    try:
+        _pkp = (state.get("phone_state") or {}).get("packageName") or ""
+        if _pkp and not str(_pkp).startswith("("):
+            path_note = app_path_hint(_pkp, task)
+    except Exception:
+        path_note = ""
     # —— 输入状态提示（2026-10-22 新增）——
     #    实测（B站HD 搜索页）：键盘已弹出、光标已在输入框内，模型却坚持"再点一次搜索框确保聚焦"，
     #    连点 6 次被判无效。原因是没人告诉它"现在可以直接打字"。
@@ -2592,10 +2658,11 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
                           "先 tap 那个【输入框】元素，再 input_text。")
     except Exception:
         input_note = ""
-    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s%s%s%s\n\n"
+    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s%s%s%s%s\n\n"
             "请输出下一步动作 JSON（点元素优先用 pick 报编号）。"
             % (task, plan_block, goal_block, page_note, step, screen,
-               exp_block, app_hint, app_note, screen_size_note, coverage_note, input_note))
+               exp_block, app_hint, app_note, screen_size_note, coverage_note, input_note,
+               path_note))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-10:] + \
                [{"role": "user", "content": user}]
     reply = call_llm(messages)
@@ -2697,6 +2764,7 @@ def main():
     blind_taps = [0]   # 盲点点击计数（坐标附近无任何元素）
     fg_miss = [0]      # 目标 App 连续不在前台的步数（>=2 触发确定性拉起）
     self_overlay = [0]  # 自家浮层（小工头）在前台的次数
+    login_overlay = [0]  # 登录引导浮层（非登录墙）出现次数
     last_sig, last_ok, last_hash = None, None, None
     last_pick = ""     # 上一步 tap 的目标文字（用于标记失效的经验坐标）
     block_streak = 0   # 连续被系统拒绝的次数
@@ -3229,6 +3297,22 @@ def main():
             try:
                 _tp = (plan or {}).get("app_package") or ""
                 if SL.login_wall(elems) and (not _tp or cur_pkg == _tp):
+                    # 2026-10-22 实测（酷安）：首页反复弹「登录引导浮层」，而它是**叠加在
+                    # 正常内容之上的**（同屏仍有十几个可读元素）。原逻辑每次按 BACK 去关，
+                    # 结果把页面导航一起打断 → 首页↔发现来回跳，13 步废掉。
+                    # 修正：内容充足 = 浮层而非登录墙 → 不按返回键，只提示模型"忽略它继续"。
+                    _is_overlay = len([e for e in elems if str(e[3]).strip()]) >= 15
+                    if _is_overlay:
+                        login_overlay[0] += 1
+                        if login_overlay[0] <= 2:
+                            print("[step %d] 登录浮层（同屏 %d 元素，非登录墙）→ 忽略并继续"
+                                  % (step, len(elems)))
+                            tracer.log(step, "result", "登录浮层忽略(%d元素)" % len(elems))
+                            history.append({"role": "user", "content":
+                                            "（系统）当前屏幕上有一个登录引导浮层，但它没有挡住"
+                                            "你要找的内容。不要按返回键、不要理它，继续按原计划操作。"})
+                        login_strikes = 0
+                        raise _SkipLogin()
                     login_strikes += 1
                     _closed = _dismiss_login(portal, elems, tracer)
                     print("[step %d] 检测到登录提示（第 %d 次，%s）"
@@ -3266,6 +3350,8 @@ def main():
                         continue                    # 关掉后重新感知、继续任务
                 else:
                     login_strikes = 0
+            except _SkipLogin:
+                pass                                # 登录浮层：忽略并继续（不算异常）
             except Exception as e:
                 print("[step %d] 登录提示处理异常（跳过）: %r" % (step, e))
         if DISPLAY > 0:
@@ -3716,12 +3802,24 @@ def main():
                     import re as _re_pc
 
                     def _hit(lab, th):
-                        parts = _re_pc.split(r"[,，|/、\s]+", str(lab or ""))
-                        return any(len(p) >= 2 and p in th for p in parts)
+                        # 锚点标签是我们自己起的名字（如「【锚点】应用游戏按钮(切到应用页)」），
+                        # 模型只会复述其中一部分 → 去掉前缀/括号后再做词元匹配
+                        _s = str(lab or "")
+                        _s = _s.replace("【锚点】", "")
+                        _s = _re_pc.sub(r"[（(].*?[)）]", "", _s)
+                        parts = _re_pc.split(r"[,，|/、\s]+", _s)
+                        if any(len(p) >= 2 and p in th for p in parts):
+                            return True
+                        # 整串（去括号后）作为子串也算命中
+                        _s = _s.strip()
+                        return bool(_s) and _s in th
 
                     _th = str(act.get("thought") or "")
                     _picked = str(_rp[2] or "")
-                    if _th and _picked and not _hit(_picked, _th):
+                    # 锚点元素豁免纠偏：它由人标定，模型不可能原样复述标签
+                    if "【锚点】" in _picked:
+                        pass
+                    elif _th and _picked and not _hit(_picked, _th):
                         _cands = [e for e in elems
                                   if e[3] and str(e[3]) != _picked and _hit(str(e[3]), _th)]
                         if len(_cands) == 1:
