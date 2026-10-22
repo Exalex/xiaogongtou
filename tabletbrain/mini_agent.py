@@ -2757,9 +2757,30 @@ def main():
     if SW_BUDGET and SL is not None and family:
         try:
             _bud = SL.budget_of(family)
+            # —— 预算按"要收集的条数"缩放（2026-10-22 实测驱动）——
+            #    微博热搜「前10条」任务只给 30 步，模型已成功打开榜单页，
+            #    却在滚动收集第 9~10 条时步数耗尽 → 白跑。
+            #    规则：list/read 家族每多要 1 条，多给 3 步（列表每屏约 6~8 条，需滚动）。
+            try:
+                _rn_b = parse_rank_n(task) or parse_rank_n((plan or {}).get("intent") or "")
+                if _rn_b and _rn_b > 3 and family in ("list", "read"):
+                    _extra = (_rn_b - 3) * 3
+                    _bud = (_bud or 30) + _extra
+                    print("[agent] 预算按条数缩放：要 %d 条 → +%d 步" % (_rn_b, _extra))
+            except Exception:
+                pass
             if _bud and _bud < max_steps:
                 print("[agent] 预算收紧: %d → %d 步" % (max_steps, _bud))
                 max_steps = _bud
+            # 步数放宽后时长要同步放宽，否则会先撞 300s 墙（每步约 3~5 秒）
+            try:
+                global TIME_CAP
+                _need_t = max_steps * 8.0
+                if TIME_CAP and _need_t > TIME_CAP:
+                    print("[agent] 时长上限同步放宽: %.0fs → %.0fs" % (TIME_CAP, _need_t))
+                    TIME_CAP = _need_t
+            except Exception:
+                pass
         except Exception:
             pass
 
