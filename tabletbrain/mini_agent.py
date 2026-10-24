@@ -419,25 +419,20 @@ def load_app_paths():
 
 
 def app_path_hint(pkg, task, elems=None):
-    """入口路径提示。优先级：自动探索地图 > 手写路径表。
+    """入口路径提示 —— **按可靠度排队，只给一份，绝不叠加**。
 
-    2026-10-22 接上「App 地图」（用户思路）：空闲时把 App 逛一遍存成地图，
-    任务开工先查地图 —— 直接回答"我在哪、要去的地方怎么走"，
-    不用每条任务都重新认路。地图没有/对不上时退回手写路径表，都没有就不提示。
+    顺序：手写路线 > 自动地图。
+    为什么是这个顺序（2026-10-22 A/B 实测教训）：
+      第一版把地图排在最前面，结果在"已经有手写路线"的酷安上，
+      一份地图 + 一份路线一起塞进提示词 → 模型单步从 3 秒涨到 5 秒，
+      省 1 步却慢了 6~18 秒，净亏。
+      实测最优组合是"坐标锚点 + 手写路线"（8 步 / 61.8s），根本不需要地图。
+    结论：**地图是替补，不是主力**。有手写路线就不翻地图；
+          只有遇到"完全没走过、没有路线"的 App，地图才上场。
     """
     try:
-        # ① 自动地图（有空 screen 识别 + 入口路径）
-        try:
-            import appmap as _am
-            _h = _am.hint_for(pkg, task, elems or [])
-            if _h:
-                return _h
-        except Exception as _e1:
-            print("[agent] App 地图不可用（%r），退回手写路径表" % (_e1,))
-        # ② 手写路径表（兜底）
+        # ① 手写路线优先：人写的、针对性强、已验证
         paths = (load_app_paths() or {}).get(pkg) or {}
-        if not paths:
-            return ""
         t = (task or "") + " "
         lines = []
         for name, spec in paths.items():
@@ -453,10 +448,19 @@ def app_path_hint(pkg, task, elems=None):
             lines.append("· %s：%s%s" % (
                 name, " → ".join(str(s) for s in steps),
                 ("（%s）" % note) if note else ""))
-        if not lines:
-            return ""
-        return ("\n\n【本 App 已知入口路径·优先照此走】\n" + "\n".join(lines) +
-                "\n（这些路径是实测验证过的，比你自己找入口更快；按顺序点即可，不要绕路。）")
+        if lines:
+            return ("\n\n【本 App 已知入口路径·优先照此走】\n" + "\n".join(lines) +
+                    "\n（这些路径是实测验证过的，比你自己找入口更快；按顺序点即可，不要绕路。）")
+
+        # ② 手写路线没覆盖这次任务 → 才翻地图（自动探索出来的，可信度次一档）
+        try:
+            import appmap as _am
+            _h = _am.hint_for(pkg, task, elems or [])
+            if _h:
+                return _h
+        except Exception as _e1:
+            print("[agent] App 地图不可用（%r）" % (_e1,))
+        return ""
     except Exception:
         return ""
 
@@ -2779,6 +2783,7 @@ def main():
     fg_miss = [0]      # 目标 App 连续不在前台的步数（>=2 触发确定性拉起）
     self_overlay = [0]  # 自家浮层（小工头）在前台的次数
     login_overlay = [0]  # 登录引导浮层（非登录墙）出现次数
+    sw_block_hint = [0]  # 同一方向滑动被拦的次数（用于给"换招"提示）
     last_sig, last_ok, last_hash = None, None, None
     last_pick = ""     # 上一步 tap 的目标文字（用于标记失效的经验坐标）
     block_streak = 0   # 连续被系统拒绝的次数
@@ -3955,6 +3960,22 @@ def main():
             elif sw_blocked:
                 exec_err = "相同滑动已连续 %d 次未到达目标" % sw_repeat
                 print("[step %d] BLOCK 滑动迷路: %s" % (step, sw_sig))
+                # 光拦住不够：模型被拦后往往还是吐同一个动作，白烧步数。
+                # （2026-10-24 便签实测：引导页要左右翻，模型连续下滑 9 次，
+                #  每次都被拦，但它不知道还能怎么滑 → 必须给出替代方案）
+                sw_block_hint[0] += 1
+                if sw_block_hint[0] == 1:
+                    history.append({"role": "user", "content":
+                                    "（系统）这个方向滑了很多次页面没动。换一种方式试："
+                                    "① 反方向滑；② 横向左右滑（有些引导页只能左右翻）；"
+                                    "③ 找页面上的「下一页/箭头/页码」按钮点；"
+                                    "④ 如果内容已经够回答任务，直接输出 done。"})
+                elif sw_block_hint[0] >= 3:
+                    print("[step %d] 连续 3 次换招无效 → 用现有信息收工，不再消耗步数" % step)
+                    tracer.log(step, "result", "滑动反复受阻→强制收工")
+                    history.append({"role": "user", "content":
+                                    "（系统强制）这个页面滑不动，不要再试滑动。"
+                                    "用你当前已经看到的内容直接输出 done 作答。"})
             elif osc_blocked:
                 exec_err = _osc_msg
                 print("[step %d] BLOCK 滚动震荡: %s" % (step, _osc_msg[:80]))

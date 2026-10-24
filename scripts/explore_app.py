@@ -164,15 +164,29 @@ def wait_stable(p, before_hash=None, min_elems=5, timeout=12.0):
 
 
 def safe_candidates(elems, limit=8, skip_labels=()):
-    """从一屏里挑"安全且值得试"的点击候选。"""
+    """挑"安全且值得试"的点击候选 —— 按屏幕分区配额，不搞全局抢名额。
+
+    两条实测修正（2026-10-24）：
+
+    ① **不再要求元素被标记为"可点击"**
+       酷安的「应用游戏」在 (1400,72)，a11y 里 clk=False，但它点了确实能切页。
+       原来 `if not clk: continue` 直接把它筛掉了 —— 而这正是最有价值的入口。
+       反正我们是按坐标点击，可点击标记只用来排序（可点的优先），不用来淘汰。
+
+    ② **分区配额，而不是全局取前 N**
+       原来一屏 8 个名额由整屏按分数抢，结果顶部导航入口被中间的"用户头像""图片1"挤掉。
+       现在顶部条/底部条/中间区各分固定名额，保证每个导航区都有人代表。
+    """
     h = 0
     for e in elems:
         if isinstance(e[2], int):
             h = max(h, e[2])
-    scored, used = [], set()
+
+    zones = {"top": [], "bottom": [], "mid": []}
+    used = set()
     for e in elems:
         idx, x, y, lab, clk = e
-        if not clk or not lab:
+        if not lab:
             continue
         s = str(lab).strip()
         if len(s) < 2 or len(s) > 12:
@@ -185,17 +199,38 @@ def safe_candidates(elems, limit=8, skip_labels=()):
             continue
         if any(w in s for w in DANGER):
             continue
-        # 纯控制键不是"入口"，点它只会回到上一页，探测它没有价值
+        # 纯控制键不是"入口"，点它只会回到上一页
         if any(w in s for w in ("返回", "后退", "上一步", "关闭", "取消", "收起")):
             continue
         if s in skip_labels or s in used:
             continue
         used.add(s)
-        scored.append((appmap.nav_score(s, y, h), x, y, s))
-    # 按"导航味"排序：优先试顶部/底部 tab、带「入口/榜单」字样的元素，
-    # 别把探测次数浪费在用户头像、视频卡片上
-    scored.sort(key=lambda kv: -kv[0])
-    return [(x, y, s) for _sc, x, y, s in scored[:limit]]
+        sc = appmap.nav_score(s, y, h)
+        if not clk:
+            sc -= 1.0                    # 没标可点击的排后面（但仍参赛）
+        z = "top" if (h and y < h * 0.18) else ("bottom" if (h and y > h * 0.84) else "mid")
+        zones[z].append((sc, x, y, s))
+
+    for z in zones:
+        zones[z].sort(key=lambda kv: -kv[0])
+
+    # 顶部条通常有 4~5 个并列入口（个人主页/应用/通知/频道/搜索…），
+    # 名额给少了会漏掉真正有用的那个（实测：酷安「应用游戏」就是这么被挤掉的）
+    q = {"top": max(3, int(limit * 0.5)),
+         "bottom": max(1, int(limit * 0.2)),
+         "mid": max(1, limit - int(limit * 0.5) - int(limit * 0.2))}
+    out, taken = [], set()
+    for z in ("top", "mid", "bottom"):
+        for item in zones[z][:q[z]]:
+            out.append(item)
+            taken.add(item[3])
+    # 还有名额就从剩下的里按分数补齐
+    if len(out) < limit:
+        rest = [it for z in zones for it in zones[z] if it[3] not in taken]
+        rest.sort(key=lambda kv: -kv[0])
+        out.extend(rest[:limit - len(out)])
+    out.sort(key=lambda kv: -kv[0])
+    return [(x, y, s) for _sc, x, y, s in out[:limit]]
 
 
 def dismiss_popups(p, elems, rounds=2):
