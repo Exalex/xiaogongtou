@@ -45,11 +45,17 @@ public final class Api {
 
     /** 提交任务。返回 null = 成功；否则返回错误文案。 */
     public static String submit(String task, String mode) {
+        return submit(task, mode, false);
+    }
+
+    public static String submit(String task, String mode, boolean replace) {
         try {
             JSONObject body = new JSONObject();
             body.put("task", task);
             body.put("mode", mode);
-            JSONObject res = post("/api/run", body.toString(), 5000);
+            body.put("replace", replace);
+            // 启动含 portal 预检/抢占收尾，实测可达 10s+：给足 20s，避免「其实成功却报离线」
+            JSONObject res = post("/api/run", body.toString(), 20000);
             if (res.optInt("_http", 0) == 200 && res.optBoolean("ok", false)) {
                 return null;
             }

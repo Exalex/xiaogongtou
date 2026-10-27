@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主按钮（提交）：深蓝玻璃底 + 亮蓝细描边（按钮内不透背景图标） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="23dp" />
+    <gradient
+        android:angle="90"
+        android:endColor="#D62A4E8A"
+        android:startColor="#D61B3057"
+        android:type="linear" />
+    <stroke
+        android:width="1.2dp"
+        android:color="#8FD2FF" />
+</shape>

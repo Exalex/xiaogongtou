@@ -93,9 +93,9 @@ public class FloatingBall {
                         if (moved) {
                             snapAndSave();
                         } else if (e.getEventTime() - e.getDownTime() > 650) {
-                            toggleDebug();   // 长按：切换调试模式
+                            openPanel();     // 长按：文字输入面板（大面板）
                         } else {
-                            openPanel();
+                            quickVoice();    // 单击：语音速记（与音量▾同款；再按一次=执行）
                         }
                         return true;
                     case MotionEvent.ACTION_CANCEL:
@@ -130,31 +130,17 @@ public class FloatingBall {
         PanelOverlay.show(ctx);
     }
 
-    /** 长按浮球：切换调试模式（写控制台 /api/debug，半透明调试窗随开关显示/隐藏） */
-    private void toggleDebug() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                String msg;
-                try {
-                    JSONObject cur = Api.get("/api/debug", 3000);
-                    boolean on = cur.optBoolean("on", false);
-                    JSONObject body = new JSONObject();
-                    body.put("on", !on);
-                    Api.post("/api/debug", body.toString(), 4000);
-                    msg = on ? "调试模式已关" : "调试模式已开：任务运行时显示半透明链路窗";
-                } catch (Exception e) {
-                    msg = "调试开关失败（控制台离线？）";
-                }
-                final String m = msg;
-                view.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show();
-                    }
-                });
-            }
-        }).start();
+    /** 单击浮球：语音速记快捷入口。
+     *  路由与音量▾快捷键一致：大面板开着 → 提交面板内容；语音条开着 → 提交语音内容；
+     *  都没有 → 弹语音速记条（自动唤起输入法语音，说完再按浮球/音量▾执行）。 */
+    private void quickVoice() {
+        if (PanelOverlay.isShowing()) {
+            PanelOverlay.hotkeyAction(ctx);
+        } else if (VoiceBar.isShowing()) {
+            VoiceBar.hotkeySubmit();
+        } else {
+            VoiceBar.show(ctx);
+        }
     }
 
     private void snapAndSave() {

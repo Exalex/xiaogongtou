@@ -69,20 +69,39 @@ public final class Notifier {
         }
     }
 
-    /** 运行中进度更新：第 N 步 + 最新动作（下拉通知栏可见） */
-    public static void updateRunning(Context c, String task, int step, String line) {
+    /** 收起"待命"常驻通知（任务运行中调用，避免与"正在干活"两条并存） */
+    public static void cancelStandby(Context c) {
+        NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm != null) {
+            nm.cancel(ID_STANDBY);
+        }
+    }
+
+    /** 运行中进度更新：第 N 步 + 最新动作 + 已运行时长（状态栏常驻、下拉可见完整文本） */
+    public static void updateRunning(Context c, String task, int step, String line, double elapsedSec) {
         ensureChannels(c);
         Notification.Builder b = base(c, CH_RESULT);
-        b.setContentTitle("正在干活…（第 " + step + " 步）");
-        String txt = task == null || task.isEmpty() ? "" : task;
-        if (line != null && !line.isEmpty()) {
-            if (line.length() > 120) {
-                line = line.substring(line.length() - 120);
-            }
-            txt = txt + "\n" + line;
+        b.setContentTitle(step > 0 ? "正在干活…（第 " + step + " 步）" : "正在干活…");
+        StringBuilder sb = new StringBuilder();
+        if (task != null && !task.isEmpty()) {
+            sb.append(task);
         }
+        if (line != null && !line.isEmpty()) {
+            if (line.length() > 140) {
+                line = line.substring(line.length() - 140);
+            }
+            if (sb.length() > 0) {
+                sb.append("\n");
+            }
+            sb.append(line);
+        }
+        String txt = sb.toString();
         b.setContentText(txt);
         b.setStyle(new Notification.BigTextStyle().bigText(txt));
+        if (elapsedSec > 0) {
+            b.setSubText("已运行 " + (int) elapsedSec + " 秒");
+        }
+        b.setProgress(0, 0, true);
         b.setContentIntent(pi(c, MainActivity.class, 2));
         b.setOngoing(true);
         b.setOnlyAlertOnce(true);

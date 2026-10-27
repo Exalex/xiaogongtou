@@ -44,6 +44,11 @@ public class EntryA11yService extends AccessibilityService {
         return instance != null;
     }
 
+    /** 当前服务实例（悬浮层组件——面板/语音/任务栏——的宿主窗口来源） */
+    public static EntryA11yService svc() {
+        return instance;
+    }
+
     public static void openPanelFromService() {
         EntryA11yService s = instance;
         if (s != null) {
@@ -65,8 +70,17 @@ public class EntryA11yService extends AccessibilityService {
             }
         } catch (Exception ignored) {
         }
+        try {
+            LaunchApi.start(this);   // 免 root 冷启动 App 的本地接口（127.0.0.1:8901）
+        } catch (Exception e) {
+            Log.w(TAG, "launch api failed", e);
+        }
         Notifier.ensureChannels(this);
         Notifier.showStandby(this);
+        try {
+            TaskBar.tearDown();   // 清掉上一代服务实例可能残留的任务栏窗口
+        } catch (Exception ignored) {
+        }
         try {
             if (ball != null) {
                 ball.hide();   // 服务重连时避免残留双浮球
@@ -103,13 +117,15 @@ public class EntryA11yService extends AccessibilityService {
      * 系统「无障碍按钮」回调。
      * 注：android-35 的 stub jar 已不含该方法，故不加 @Override——
      * 运行时按虚方法分派，签名匹配即会被系统调用（API 34+ 无参 / 26-33 带 displayId）。
+     * 打开方式与浮球一致：**就地展开无障碍 overlay 面板**——Activity 从后台启动会被
+     * ColorOS o-stop 拦截（实测点击无反应），勿改回 QuickPanelActivity。
      */
     public void onAccessibilityButtonClicked() {
-        QuickPanelActivity.open(this);
+        PanelOverlay.show(this);
     }
 
     public void onAccessibilityButtonClicked(int displayId) {
-        QuickPanelActivity.open(this);
+        PanelOverlay.show(this);
     }
 
     /**
@@ -408,6 +424,10 @@ public class EntryA11yService extends AccessibilityService {
             dbg = null;
         }
         try {
+            TaskBar.tearDown();
+        } catch (Exception ignored) {
+        }
+        try {
             volHandler.removeCallbacksAndMessages(null);
         } catch (Exception ignored) {
         }
@@ -484,17 +504,27 @@ public class EntryA11yService extends AccessibilityService {
     private String buildTreeJson(String seq) {
         try {
             org.json.JSONArray arr = new org.json.JSONArray();
-            java.util.List<android.view.accessibility.AccessibilityWindowInfo> ws = getWindows();
+            // 必须用 getWindowsOnAllDisplays()：getWindows() 只看默认屏，
+            // 影子屏（虚拟屏）上的整屏元素会丢失（2026-09-27 实测踩坑）。
+            android.util.SparseArray<java.util.List<android.view.accessibility.AccessibilityWindowInfo>> all =
+                    getWindowsOnAllDisplays();
             int idx = 0;
-            if (ws != null) {
-                for (android.view.accessibility.AccessibilityWindowInfo w : ws) {
-                    int type = w.getType();
-                    if (type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
-                            || type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
-                            || type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM) {
-                        android.view.accessibility.AccessibilityNodeInfo root = w.getRoot();
-                        if (root != null) {
-                            idx = collectNodes(root, arr, idx, 0);
+            if (all != null) {
+                for (int di = 0; di < all.size(); di++) {
+                    java.util.List<android.view.accessibility.AccessibilityWindowInfo> ws = all.valueAt(di);
+                    if (ws == null) {
+                        continue;
+                    }
+                    for (android.view.accessibility.AccessibilityWindowInfo w : ws) {
+                        int type = w.getType();
+                        if (type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                                || type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+                                || type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM) {
+                            android.view.accessibility.AccessibilityNodeInfo root = w.getRoot();
+                            if (root != null) {
+                                // 携带 displayId（第 6 位）——影子屏（正式模式）靠它过滤出目标屏元素
+                                idx = collectNodes(root, arr, idx, 0, w.getDisplayId());
+                            }
                         }
                     }
                 }
@@ -511,8 +541,8 @@ public class EntryA11yService extends AccessibilityService {
     }
 
     private int collectNodes(android.view.accessibility.AccessibilityNodeInfo n,
-                             org.json.JSONArray arr, int idx, int depth) {
-        if (n == null || depth > 40 || idx >= 400) {
+                             org.json.JSONArray arr, int idx, int depth, int dpy) {
+        if (n == null || depth > 40 || idx >= 700) {
             return idx;
         }
         try {
@@ -530,6 +560,7 @@ public class EntryA11yService extends AccessibilityService {
                     one.put(b.centerY());
                     one.put(label.length() > 220 ? label.substring(0, 220) : label);
                     one.put(clk);
+                    one.put(dpy);   // 第 6 位：所在显示屏 id（影子屏过滤用）
                     arr.put(one);
                     idx++;
                 }
@@ -537,8 +568,8 @@ public class EntryA11yService extends AccessibilityService {
         } catch (Exception ignored) {
         }
         int cnt = n.getChildCount();
-        for (int i = 0; i < cnt && idx < 400; i++) {
-            idx = collectNodes(n.getChild(i), arr, idx, depth + 1);
+        for (int i = 0; i < cnt && idx < 700; i++) {
+            idx = collectNodes(n.getChild(i), arr, idx, depth + 1, dpy);
         }
         return idx;
     }
@@ -591,7 +622,7 @@ public class EntryA11yService extends AccessibilityService {
         @Override
         public void run() {
             while (alive) {
-                long sleepMs = 12000;
+                long sleepMs = 2000;   // 空闲 2s（提交后通知/任务栏能更快亮起）
                 try {
                     JSONObject st = Api.get("/api/status", 4000);
                     String state = st.optString("state", "idle");
@@ -600,23 +631,37 @@ public class EntryA11yService extends AccessibilityService {
                     boolean running = "running".equals(state);
                     if (running) {
                         sleepMs = 2000;
-                        // 运行中：更新通知（第 N 步 + 最新动作）
+                        // 运行中：持续更新通知（最新进展 = 最后一条有意义的日志行 + 已运行时长）
                         try {
+                            Notifier.cancelStandby(app);   // 运行中收起"待命"通知（避免两条并存）
                             int stepNo = st.optInt("step", 0);
                             String latest = "";
                             org.json.JSONArray ls = st.optJSONArray("lines");
                             if (ls != null) {
                                 for (int i = ls.length() - 1; i >= 0; i--) {
                                     String s = ls.optString(i, "").trim();
-                                    if (s.startsWith("[step ")) {
+                                    if (s.isEmpty() || s.startsWith("[wxsend] exec:")) {
+                                        continue;
+                                    }
+                                    if (s.startsWith("[step ") || s.startsWith("[wxsend]")
+                                            || s.startsWith("[agent]")) {
                                         latest = s;
                                         break;
                                     }
+                                    if (latest.isEmpty()) {
+                                        latest = s;   // 兜底：最近一条非空行
+                                    }
                                 }
                             }
-                            if (stepNo > 0) {
-                                Notifier.updateRunning(app, task, stepNo, latest);
-                            }
+                            latest = latest.replaceFirst("^\\[wxsend\\]\\s*", "");
+                            latest = latest.replaceFirst("^\\[t\\+\\s*[\\d.]+s\\]\\s*", "");
+                            latest = latest.replaceFirst("^\\[step \\d+\\]\\s*", "");
+                            latest = latest.replaceFirst("^\\[agent\\]\\s*", "");
+                            Notifier.updateRunning(app, task, stepNo, latest,
+                                    st.optDouble("elapsed", 0));
+                            // 顶部任务栏：同一份状态驱动（"接管"进度显示）
+                            TaskBar.onRunning(EntryA11yService.this, task, stepNo,
+                                    st.optDouble("elapsed", 0), latest);
                         } catch (Exception ignored) {
                         }
                     }
@@ -631,13 +676,20 @@ public class EntryA11yService extends AccessibilityService {
                                 String result = st.optString("result", "");
                                 Notifier.showResult(app,
                                         "完成：" + (result.isEmpty() ? "任务结束" : result), task);
+                                TaskBar.onResult(EntryA11yService.this,
+                                        TaskBar.KIND_OK, task, result);
                             } else if ("failed".equals(state)) {
                                 String why = st.optString("failed_reason", "");
                                 Notifier.showResult(app,
                                         "未完成：" + (why.isEmpty() ? "失败" : why), task);
+                                TaskBar.onResult(EntryA11yService.this,
+                                        TaskBar.KIND_FAIL, task, why);
                             } else if ("stopped".equals(state)) {
                                 Notifier.showResult(app, "已停止", task);
+                                TaskBar.onResult(EntryA11yService.this,
+                                        TaskBar.KIND_STOP, task, "");
                             }
+                            Notifier.showStandby(app);   // 任务结束：恢复"待命"常驻通知
                         }
                     }
                     prevState = state;

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 无边界衬底：径向柔雾（中心微暗便于读字，四周完全渐隐） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:centerX="0.5"
+        android:centerY="0.46"
+        android:endColor="#00050A14"
+        android:centerColor="#2E050A14"
+        android:gradientRadius="115%p"
+        android:startColor="#52050A14"
+        android:type="radial" />
+</shape>

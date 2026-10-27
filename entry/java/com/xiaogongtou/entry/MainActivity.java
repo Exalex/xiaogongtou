@@ -17,9 +17,11 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
-/** 主界面：全屏 WebView 壳，加载本机控制台（127.0.0.1:8900） */
+/** 主界面：全屏 WebView 壳，加载本机控制台的「对话页」（127.0.0.1:8900/chat） */
 public class MainActivity extends Activity {
     private static final int REQ_NOTIF = 31;
+    /** 主界面默认页：对话壳（AI 对话框 + 历史 + 结果卡）；页内「⌂ 控制台」按钮回旧控制台 */
+    private static final String HOME_PATH = "/chat";
 
     private WebView web;
     private TextView hintBar;
@@ -27,12 +29,16 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        try {
+            LaunchApi.start(this);   // 入口 App 一打开就提供 8901（不依赖无障碍服务是否连上）
+        } catch (Exception ignored) {
+        }
         if (handleShare(getIntent())) {
             return;
         }
         buildUi();
         maybeAskNotifications();
-        web.loadUrl(Api.BASE + "/");
+        web.loadUrl(Api.BASE + HOME_PATH);
     }
 
     @Override
@@ -161,7 +167,7 @@ public class MainActivity extends Activity {
                 + "<p>小工头的大脑（控制台）没在响应。通常是：<br>"
                 + "1. 控制台刚经历异常，守护会在 60 秒内自动拉起；<br>"
                 + "2. 手机刚重启，需要打开一次 Termux 或等待开机自启。</p>"
-                + "<a href=\"" + Api.BASE + "/\">重试</a>"
+                + "<a href=\"" + Api.BASE + HOME_PATH + "\">重试</a>"
                 + "</body></html>";
         web.loadDataWithBaseURL(null, html, "text/html", "utf-8", null);
     }

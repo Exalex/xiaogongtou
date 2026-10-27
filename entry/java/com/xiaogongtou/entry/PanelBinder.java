@@ -36,6 +36,7 @@ public class PanelBinder {
     private final TextView modeAuto;
     private final TextView modeJev;
     private final TextView modeQwen;
+    private final TextView modePi;
 
     private String mode;
     private SpeechRecognizer sr;
@@ -52,6 +53,7 @@ public class PanelBinder {
         modeAuto = (TextView) root.findViewById(R.id.modeAuto);
         modeJev = (TextView) root.findViewById(R.id.modeJev);
         modeQwen = (TextView) root.findViewById(R.id.modeQwen);
+        modePi = (TextView) root.findViewById(R.id.modePi);
 
         View card = root.findViewById(R.id.card);
         if (card != null) {
@@ -88,6 +90,12 @@ public class PanelBinder {
             @Override
             public void onClick(View v) {
                 setMode("qwen");
+            }
+        });
+        modePi.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setMode("pi");
             }
         });
         btnSend.setOnClickListener(new View.OnClickListener() {
@@ -152,6 +160,26 @@ public class PanelBinder {
         host.onCancel();
     }
 
+    /** 提交成功：任务胶囊从输入框飞向顶部任务栏（"把任务丢到任务栏"） */
+    private void flyToTaskBar(String task) {
+        try {
+            int[] loc = new int[2];
+            input.getLocationOnScreen(loc);
+            float cx = loc[0] + input.getWidth() / 2f;
+            float cy = loc[1] + input.getHeight() / 2f;
+            EntryA11yService s = EntryA11yService.svc();
+            if (s != null) {
+                FlyView.launch(s, cx, cy, task, new Runnable() {
+                    @Override
+                    public void run() {
+                        TaskBar.landed();
+                    }
+                });
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     private void setMode(String m) {
         mode = m;
         Prefs.setMode(ctx, m);
@@ -162,6 +190,7 @@ public class PanelBinder {
         setChip(modeAuto, "auto".equals(mode));
         setChip(modeJev, "jev".equals(mode));
         setChip(modeQwen, "qwen".equals(mode));
+        setChip(modePi, "pi".equals(mode));
     }
 
     private void setChip(TextView v, boolean on) {
@@ -198,6 +227,8 @@ public class PanelBinder {
                         btnSend.setText("发送");
                         if (err == null) {
                             Notifier.showRunning(ctx, task);
+                            TaskBar.kickoff(ctx, task);   // 顶部任务栏立即点亮
+                            flyToTaskBar(task);           // "任务丢进任务栏"动画
                             host.onSubmitSuccess(task);
                         } else {
                             host.toast("没提交成功：" + err);
