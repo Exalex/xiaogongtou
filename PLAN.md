@@ -291,3 +291,388 @@ mobilerun-ondevice/
 - onServiceConnected 增加"先 hide 旧浮球"防御（服务重连防双浮球）。
 
 **实测**：按音量下 → 条+键盘+搜狗语音面板自动弹出（`logs/voicebar_v5.png`）→ 文字上屏（`voicebar_v7.png`）→ 再按 → `voice: submitted: home` → 控制台 running→done ✓；面板「说话」→ 自动切换语音条 ✓（`logs/panel_speak_switch.png`）。
+
+---
+
+## 9-27 · 豆包手机思路调研 + 「影子屏」实测打通 ✅【新方向，待拍板】
+
+用户带来"豆包手机自动化跑在后台虚拟屏、手机可正常用"的说法，要求调研 + 评估我们能否改造。
+**结论：能改，且最大不确定性已在今天实测消掉** —— 完整方案文档：`豆包手机思路调研与改造方案.md`。
+
+实测（一加9 / Android14 / root，scrcpy v4.1 `--new-display`，全程约 30 分钟）：
+- 影子屏创建成功（id=64/65/66/67，**每次动态**），flags 含 FLAG_OWN_FOCUS / FLAG_OWN_DISPLAY_GROUP / FLAG_ALWAYS_UNLOCKED；物理屏 0 全程不受影响；
+- `am start --display N` 把设置 App 开上影子屏 ✓；`input -d N tap` 点进 WLAN 页 ✓；
+- **关键**：EntryA11yService + portal `/state_full` 直接读到影子屏页面元素（WLAN / 已连接 / 可用网络）—— 现有 agent 元素清单链路可平移到影子屏；
+- 并行验证：自动化进行中主屏实拍停在桌面、前后两次主屏截图字节级一致；
+- 收尾：杀手机侧 server → "Recording complete" + 虚拟屏自动销毁，无残留。
+- 坑：`screencap -d` 抓不了虚拟屏（本 ROM 限制）；录屏用 mkv + 杀"服务端"收尾才完整；录屏色彩标签 ycgco/log316 需 ffmpeg setparams 重标（抽帧脚本 `logs/vdtest/make_evidence.py`）。
+- 证据：`logs/vdtest/`（evidence_side_by_side.png / newdisp4.mkv / portal_*.txt）；技能沉淀：`android-shadow-display`。
+
+**待用户拍板**：① 启动 POC（建议）② 管家首版借 scrcpy-server（建议）③ 敏感 App 白名单策略（建议）。
+
+---
+
+## 9-27 下午 · P0 交付：「数据仓 + 对话壳 v0 + 测试模式」✅【已上机验证】
+
+用户「开始吧」放行后当天完成（含双任务实测）。**一句话**：执行照旧，但结果从"网页临时状态"升级为"手机本机数据库"，界面 = 对话 + 历史（刷新/重启不丢）。
+
+**交付物**（源码 `scripts/`，已部署手机 `~`）：
+- `store.py` — 数据仓：SQLite `~/bridge/store.db`，三表（sessions / messages / datasets）；结果自动抽结构化列表（"1. xx 2. yy…" → 行）；`import_runs()` 回填老任务（首启回填 92 条历史）。
+- `chat_ui.py` — 对话壳 v0：`/chat` 页 = 会话历史（最近 40 条 + 搜索框）+ 结果卡（结构化「列表·N行」表 +「同一任务的历史数据（可对比）」+ 再跑一次 / 看录屏 / 复制链接）。
+- `mini_console.py` — 集成落库（开工/收工写库）+ 新 API：`/api/sessions`（历史/搜索）、`/api/session?rid=`（详情）、`/api/exec`（执行方式：测试模式 + 录屏开关）。
+- `deploy_p0.sh` — 一键部署链（push → cp → 重启控制台 → 探活）。
+
+**实测（全过）**：
+- 「去微博找一下热搜前五是什么？」→ 完成（引擎 jev、9 步、45 秒），录屏 43s / 1080×2400 / 10.8MB → 库中 5 行结构化数据；09:47 同任务的 5 行出现在「历史数据（可对比）」区 ✓
+- 重启控制台后数据仍在：94 条会话（done 67 / failed 25 / stopped 2 = 92 条历史回填 + 2 条新任务）✓
+- 手机浏览器开 `127.0.0.1:8900/chat` 直接可用（`logs/p0/phone_chat.png`）；PC 侧整页截图 `logs/p0/chat_tall.png` ✓
+
+**新坑（血泪）**：
+- **screenrecord 被 Termux 环境变量毒死**：root 控制台 spawn `/system/bin/screenrecord` 时继承了 `LD_LIBRARY_PATH=/data/data/com.termux/files/usr/lib` → 系统二进制去加载 Termux 的错 so → `CANNOT LINK EXECUTABLE … cannot locate symbol "Xzs_Construct"`，**最阴的是 rc=0 却没产出文件**。修复：spawn 前 `env.pop("LD_LIBRARY_PATH")`（rec_start 内）。诊断法：同一条命令 `su -c` 裸跑成功、从 python spawn 失败 = 环境继承差异。
+- **重启控制台**：`pkill -f mini_console.py` 与启动**必须分两条命令**（同一条会自匹配杀链）；部署脚本已按此写（+ setsid）。
+
+**双模式现状**：测试模式 = 主屏执行 + 录屏 + 徽章「测试模式(主屏)」；正式模式（影子屏）UI 已留位（灰显"正式模式（P1 未上线）"）。
+
+**下一步（待拍板）**：P1 影子屏管家（建议开工，首版借 scrcpy-server）→ 正式模式；P2 应用地图；P3 微信通知通道（并行）。
+
+---
+
+## 9-27 下午（二）· 入口 APK 化 v1.1：点图标 = 对话页 ✅【已装机实测】
+
+用户拍板：**「入口我还是要坚持变成 APK——生成快、稳定性高」** → 当天落地 + 装机验证。
+
+**改了什么**（`entry/` + `scripts/chat_ui.py`）：
+- `MainActivity` 默认页 `/` → `/chat`（常量 `HOME_PATH`）：点桌面图标**直接进对话页**；页内「⌂ 控制台」↔ 控制台顶栏「💬」双向可达。
+- 对话页两处交互补丁：点历史卡片**自动滚到结果详情**（`#streamsec` scrollIntoView）；「看录屏」在 App 内**当前页播放**（UA 含 `; wv)` 判定）；PC 浏览器行为不变（仍新开标签）。
+- 无障碍按钮回调 `QuickPanelActivity`（Activity，会被 o-stop 拦）→ **`PanelOverlay.show`**（就地 overlay，与浮球同路径）。注：真机上暂未定位到按钮实体（ColorOS 需用户在无障碍设置里开启"快捷方式"才显示），此改动为预防性修复。
+- 版本 `1.1 (versionCode 2)`。构建 `python entry/build.py`（~1 分钟）→ `adb push` + `su -c pm install -r`。
+
+**实测链（全过）**：开 App 直达对话页 ✓ → 点卡片滚到详情（结果+5 行列表+同任务对比）✓ → ⏺看录屏（43s 实录在 App 内播放）✓ → BACK 回对话 ✓ → ⌂控制台 ✓ → 💬 回对话 ✓ → 输入框弹键盘、界面自动上移 ✓。证据：`logs/p0/apk_chat1.png`、`apk_chat3.png`、`apk_rec.png`、`apk_kb.png`、`apk_console2.png`。
+
+**坑（血泪）**：
+- **`am force-stop com.xiaogongtou.entry` 会被 ColorOS 顺带摘掉它的 a11y 服务**（浮球消失、App 内出现"悬浮球未开启"黄条）→ 手动补回（写 `portal:小工头` 两个服务名 + `accessibility_enabled 1`）或等 supervisor ≤5 分钟自动补。**不要用 force-stop 重启该 App**。
+- 排查乌龙记录：装机后桌面右缘出现「小工头」图标气泡，一度误判为"系统无障碍按钮"。实际 = **ColorOS 装机后的提示样式**（点它打开应用抽屉、会自行消失）；把入口 a11y 服务临时摘掉它依然在 → 不属于本 App 悬浮窗。以后看到 = 正常现象。
+- 顺带：`Eden Nightly` 弹了一个"允许安装应用"系统弹窗（与本次改动无关），已点「拒绝」关闭；如需让 Eden 装 APK 请自行再授权。
+
+---
+
+## 9-27 傍晚 · P1 交付：「影子屏管家 + 正式模式」✅【已上机实测】
+
+用户拍板「一（P1 管家）和二（App 地图）先做」。本节 = P1。
+
+**一句话**：手机靠自己（不再需要电脑）开机后台的"影子屏"，任务可以在影子屏上跑、主屏照常用——「正式模式」从灰按钮变成了真功能。
+
+**交付物**（都在 `scripts/`，已部署手机）：
+- `shadow.sh`（部署到 `/data/adb/mobilerun-console/`）——影子屏管家：`start/stop/status`；开屏 = 手机端 root 起 scrcpy-server 4.1（`tunnel_forward=true`）+「哑客户端」连两条流（video+control）并读丢，屏由本机进程自持（不依赖 PC）。
+- `shadow_client.py`——哑客户端：连 `@scrcpy_05ad0001` 两次、持续 drain；服务端死了自己退出。
+- `supervisor-loop.sh` v4——新增第 5 项守护：`shadow.on` 开关打开时，影子屏不在就自动拉起（开机/崩溃都兜）。
+- `mini_console.py`——`/api/shadow`（GET 状态 / POST start|stop）；`start_run` 在「正式模式」下先确保影子屏并给 agent 传 `--display N`。
+- `mini_agent.py`——新增 `--display N`：**正式模式全链路改走 display**（感知 = 桥树按 displayId 过滤；动作 = `input -d N`；开 App = `am start --display N`）。
+- `chat_ui.py`——「正式模式 · 影子屏」按钮变真：点它启动影子屏并切换模式；结果卡徽章显示「正式模式(影子屏)」。
+
+**支撑改动（入口 App v1.1 再更新）**：
+- `EntryA11yService` 树导出升级：① `getWindows()` → **`getWindowsOnAllDisplays()`**（关键坑：前者只看默认屏，影子屏整屏元素会丢）；② 元素第 6 位加 **displayId**（影子屏过滤靠它）；③ 元素上限 400→700。
+
+**实测（全过）**：
+- 手机端自开影子屏：`shadow.sh start` → ~2.5s 出屏（id=70），15s 后仍持久 ✓；`stop` → 屏销毁、无残留 ✓。
+- 同一任务「微博热搜前五」在**正式模式**跑：**5 步 60 秒**完成（jev 一路），返回 5 条真热搜 ✓；结果自动入库（exec_mode=prod）。
+- **主屏零影响（像素级）**：任务全程对主屏截 3 张图（开始/中途/结束），剔掉状态栏后**像素差 0**（只有时钟在走）✓。
+- 桥树多屏输出验证：同一次取树 = 主屏 66 + 影子屏 18 个元素（带 displayId）✓。
+
+**坑（血泪，全当天踩出来的）**：
+- **Termux 的 `am` 会顶掉系统的 `am`**：agent 环境 PATH 里 Termux bin 在前，`subprocess(["am", ...])` 实际执行 Termux:API 的 am（只打印帮助文本）→ **open_app 全部静默失败**（首轮正式模式任务 25 步全废就死在这）。→ 系统二进制一律 `/system/bin/` 绝对路径（`am/cmd/dumpsys/input` 已全改）。
+- **`getWindows()` 只看默认屏**：影子屏元素整屏丢失 → 必须 `getWindowsOnAllDisplays()`。
+- `scid` 必须是 ≤0x7FFFFFFF 的十六进制数字（`fad00001` 溢出崩）。
+- 正式模式下**不要回退用 portal 树**（portal 焦点跟"最后被触的那块屏"漂移，会混入主屏元素、点下去指错地方）→ 影子屏空树就按空屏处理。
+- 正式模式**感知只认桥树**（`getWindowsOnAllDisplays` 天然含全部显示屏 + displayId）。
+
+**证据**：`logs/shadow/`（main_t0/t1/t2.png 主屏三连、prod_run2.out 任务日志、tree_dpy2.json 多屏树、atlas_scan_live.png 扫描现场）。
+
+---
+
+## 9-27 夜间 · 微信首次操作实测：「点得动、看不着」（P3/P4 前置侦察）
+
+用户「测试一下微信的操作」→ 对微信做了一次**最小化首触测试**（低频 1 次、白天、主屏短促；共 3 次点击、零消息发送 / 零输入）。
+
+**结果一句话**：微信 **"点得动、看不着"** —— 打开 / 切标签页正常；第三方 a11y 读微信界面 **整树为空**；截图正常。
+
+**实测明细**（一加9 / A14 / 微信 8.0.78）：
+- 打开微信（monkey）✓ → 点「发现」/「微信」标签页（root 桥 `input tap`）✓（`logs/wechat_test/wx_taps.mp4` 录屏可见切换全程）→ HOME ✓。
+- **取树 4 次全空**（仅系统状态栏 21–22 元素；对照：桌面 37–52 元素正常）。ViewDebug 交叉验证：微信界面是标准控件（TextView / ConversationListView）→ **不是"没法读"，是 a11y 层被拦**。
+- 机理（社区交叉验证）：微信 8.0.52+ 对**非系统白名单**的 a11y 服务**直接不给节点**（空值）；已知绕过 = ①服务名伪装（SelectToSpeak 式，灰区待拍板）②截图+OCR/VLM（干净路线）。
+- 全程**无安全提醒 / 异常弹窗**。
+
+**新增工具 / 修复**：
+- `scripts/pc_bridge.py`：PC 侧 root 桥操作台（tree / tap / swipe / key / open / shot），手测回归用。
+- `scripts/pc_portal.py`：修系统代理坑（`ProxyHandler({})` 直连；否则 127.0.0.1:7897 把局域网请求转成 502）。
+- 坑：`screenrecord` **shell 用户段错误（RC=139）/ root 正常**；adb pull 远端路径要 `MSYS_NO_PATHCONV=1`；拉 root 文件先 `chmod 644`。
+
+**策略影响**（已同步 `实施总方案-v2.md` §1.1 / §1.7 / §4 / §5）：微信 UI 的"读"≈0 → **P3 通知直回优先**；P4 先定感知路线；agent 需加"前台=微信且树空 → 拒绝乱点"保护（新增待办）。
+
+**证据**：`logs/wechat_test/`（README + 截图 8 张 + 录屏 + 树 JSON ×7）。
+
+---
+
+## 9-28 傍晚 · 微信"读被屏蔽"的机理坐实 + 视觉兜底路线跑通 🚧【代码就绪，待部署】
+
+用户问「现在的问题是什么？怎么解决？给方案+胜率+调研」→ 当天完成：机理定位、视觉路线端到端实测、代码落地（待部署）。
+
+**机理（决定性证据）**：微信前台时 portal 直接报 `No active window or root filtered out` —— 不是"节点属性被混淆"，是**根节点被过滤**（窗口内容一点都不给）。对照：同刻桌面/其他 App 树 30–50 元素正常。
+
+**视觉兜底实测（portal 8080 经局域网，全程未用 adb）**：
+- 截图 ✅（1080×2400；portal 返回 base64 JSON、PNG 为 RGBA —— 两个坑）
+- 多模态读屏 ✅ 准确（会话名/时间/角标全对）；坐标 = **0–1000 归一化**（换算后与真实控件误差 ±3~30px）
+- 闭环点击 ✅：发现✓ / 通讯录✓ / 我✓（"微信号"误匹配的坑：元素匹配要"精确优先"，别用子串）
+- 延迟 ⚠️ ~12s/次；**关思考**（`enable_thinking=false`）后输出稳定（否则偶发空）
+- 稳定复现一次反例：探针在微信个人资料页把"微信号：ghostex"当成"微信"标签点进去 → 记录为工程注意项
+
+**代码落地（`scripts/mini_agent.py`，PC 侧干跑已验，待上手机）**：
+- 新增 `vision_apps()`（内置 `com.tencent.mm`，可外部 `~/bridge/skills/vision_apps.json` 扩展）
+- 新增 `vision_elements()`：截图 → 多模态模型 → 伪元素清单（坐标自动归一化→像素、空输出重试、25 项上限）
+- 主循环新增：**前台 App 命中 vision_apps → 视觉接管感知**（下游 Jev/qwen/动作**零改动**）
+- 干跑实测：桌面 24 元素、微信页 15 元素（坐标与真实控件吻合）
+
+**新增脚本**：`_vision_probe.py`（视觉闭环探针）· `_tree_stats.py`（树解剖：一眼看出是不是被屏蔽）· `_vlm_probe.py`（模型视觉能力探测）· `_wx_back.py`（退回微信主界面）· `pc_portal.py`（已修代理坑）
+
+**文档**：`微信自动化方案评估.md`（问题/五套方案与胜率/调研/执行计划）· `实施总方案-v2.md` §1.8
+
+**待办（阻塞项）**：测试机无线调试断了（重启后 5555 未起，只剩 portal 8080）→ **需插一次数据线**才能部署上机 + 跑 `isAccessibilityTool` 对照实验。
+
+**调研要点（2026）**：微信 8.0.58 起第三方无障碍"布局分析"不可用（AutoJs6 #463）；社区绕过=服务名伪装（Assists/Auto.js Pro，灰区、随时可补）；主流开源手机 agent（UI-TARS / AppAgent / Open-AutoGLM / Mobile-Agent）**统一走"截图+视觉"**；Ruto（iamr0s）用 Shizuku+虚拟屏+Open-AutoGLM —— 与我们"影子屏"同构，方向被独立印证。
+
+**✅ 端到端跑通（同日追加）**：新增 `scripts/_agent_pc_run.py`（PC 侧干跑：portal 8080 + LAN 模型；主屏模式全程无需 adb）。
+任务「打开微信，列出聊天列表前 5 个会话（只读不点）」→ **2 步完成**：
+`open_app` → portal 报 `root filtered out` ×3 → 桥超时 → **视觉兜底 16 元素** → qwen `done` 作答，**5 个会话名逐字吻合**、全程零点击。
+证据：`logs/wechat_test/vision/agent_run_readonly.md` + `agent_trace.jsonl`。
+附带补丁：portal 状态读取"抛异常"时也能进入视觉兜底（`_LAST_PKG` 推定前台包名；`pre_elems is None` 防重复调用视觉）。
+
+---
+
+## 9-27 傍晚 · 对话页 v4 双视图重构（用户反馈：「历史全量展示 + 点开要滚很远」）
+
+**用户反馈**：前端界面奇怪——任务对话历史全量铺开；点一条后要"跳很远"才能看到详情。
+
+**根因**：原 `/chat` 是**单页堆叠**：列表区（最多 40 条全渲染）在上、详情区在下，同处一个滚动流 → 点卡片只能往下滚过整段列表才能看到详情。
+
+**重构（`chat_ui.py` 整页重写 + 两个数据接口小改）**：
+1. **双视图架构**：列表视图 ⇄ 详情视图 = **两个独立滚动容器**（`body.view-list / view-detail` 切 `display`）——点一条**即时切换、零滚动**（详情从顶部开始）；0.18s 入场动画。
+2. **列表分页**：20 条/页 +「加载更多 · 还有 N 条」+「共 N 条」；搜索同样分页。数据层：`store.list_sessions(offset=)` + 新增 `store.count_sessions()`；`/api/sessions` 返回 `{items,total,offset}`。
+3. **日期分组**：今天 / 昨天 / MM月DD日。
+4. **导航语义**：页内「‹ 历史」+ **安卓返回键**（`history.pushState/popstate` —— 与 MainActivity.onBackPressed→web.goBack 天然打通，**APK 无需改**）；详情内「同一任务历史数据」行也可点击切换。
+5. **桌面自适应**：≥760px 自动左右分栏（列表 340px 常驻 + 详情并排，「‹ 历史」隐藏）。
+6. 顶栏运行态提示（⚡ 运行中）；发新任务自动进详情看实时进度。
+
+**验收（两层全过）**：
+- **PC 探针** `scripts/probe_chat_ui.mjs`（playwright-core + Edge headless，移动视口 393×852）：首屏=列表（20 条/共 98 条）→ 点会话 `view-detail` 且 `scrollTop=0`、数据卡在列 → 「‹ 历史」/浏览器后退均回列表 → 加载更多 20→40 → 搜索"微博"共 43 条 → 宽屏 340px 分栏 → **0 JS 报错**。截图 `logs/p0/ui/01~07`。
+- **真机（APK 跑在影子屏 72）**：a11y 树证列表在列 → `input -d 72 tap` 点第 2 条 → 树变详情（‹历史/数据5行/再跑一次/同任务对比）→ **`input -d 72 keyevent BACK` 回列表** ✓；物理屏（用户正在用淘宝）全程零影响。
+
+**新坑**：桥树请求 `.xgt_req` 的 **seq 每次必须不同**——相同 seq 被工程端跳过重建，`cat .tree.json` 读到**旧树**（本次差点误判成"影子屏 a11y 读不到"）。
+
+**证据**：`logs/p0/ui/`（截图 7 张 + probe-report.txt + tree_app72b/c/d.json）。
+
+---
+
+## 9-29 凌晨 · 防检测总纲 + 脚本封装方案定稿（用户三问：截屏 / 输入 / 点击的检测面）
+
+**用户关切**：① 封装成"直接脚本"，但担心"识别会出问题、不知道操作得怎么样"；② 截屏会不会触发封号（一天几百几千次肯定有问题？）；③ 打字（弹键盘）、点屏幕，人和机器有没有区别。要求"全链路都不能被微信检测到"。
+
+**调研结论（官方文档 + 社区交叉验证 + 本项目实测）**：
+- **截屏：微信看不见**——Android 14 截屏检测 API 仅覆盖"用户按硬件键"的截屏；官方明确 adb / 程序化截屏**不触发**；我们的通道不落相册、不用 MediaProjection → 风险≈0。
+- **打字：正常链路**——字由搜狗输入法提交，与真人打字无链路区别。
+- **点击：唯一理论检测面**——注入事件微观特征（deviceId / 时长 / 压力 / 坐标静态性 / 节奏）理论可查；无证据微信启用（它防"读"不防"点"）。对策 = 拟人化三层：坐标抖动 ±3~15px、按压 60–180ms、间隔 0.4–1.5s 随机；P4 可选 sendevent 内核级注入。
+- **真正的风险在行为层（消息频率 → 限速白名单）与环境层（root 未藏 → Shamiko 待办=高优先级）。**
+
+**脚本封装定稿**：目标形态 `wx_send.py --to "hao" --text "test" [--dry-run|--confirm]`；五方案 = A 全视觉 / B 固定坐标 / **C 状态机+双重校验（推荐骨架）** / D 人工确认 / E 影子预演；上线节奏 **E→D→C**；回执 = 每步截图 + 结果报告 + 会话列表侧证（"不知道操作得怎么样"的答案）。
+
+**产出**：`微信自动化-防检测与封装方案.md`（三个担心的直接回答 / 全链路检测面表 / 五方案 / 识别出错对策表 / 运行纪律参数表 / 待办优先级）。
+
+---
+
+## 9-29 凌晨（二）· 执行架构设计定稿（视觉调用时机 + Jev 分工 + 时间预算）
+
+**用户要求**：① 全部事情同时做；② 回答"视觉识别在固定/随机事件什么时候调用效率最高"；③ 把 Jev 融入（不是什么都给千问走）；④ 预估最快几秒（20 分钟太慢）；⑤ 先把整个方案设计好。
+
+**实测底数（本次新测）**：
+- **Jev 云决策 0.74s / 1.58s**（且决策正确：给"hao 发消息"场景选中 hao 行 conf=0.95）；
+- 千问文本 0.62~0.74s（短答）；千问视觉 ~12s（沿用）；**portal 截图 ~1.05s**；portal 状态 0.14~0.27s。
+
+**定型架构（三级感知调度）**：L0 本地对账（~0.1s，全程用）→ L1 Jev 快决策（0.7~1.6s，仅清单有歧义）→ L2 视觉（~12s，**只在两个时点：任务入口 + 校验失败**）。三条原则：一图多问 / 调用必沉淀经验卡 / 单任务 ≤2 次。加速三招：搜索直达（把"找行"变固定路径）、缓存+校验、置顶（可选）。
+
+**时间预算**：全固定 0 视觉 **≈12-15s**（优化目标 ≤10s）；含 1 次定位 ≈25-30s；对照今晚人工遥控 ~20 分钟（约 100 倍）。
+
+**实施**：T1 Shamiko / T2 拟人化 / T3 wx_send.py 三模式 / T4 回执 / T5 三级感知进 agent / T6 sendevent 评估——**全部放行，PC 侧三件先全开**。
+
+**产出**：`微信自动化-执行架构设计.md`；探针 `scripts/_latency_probe.py`。
+
+---
+
+## 9-29 傍晚 · T5 技能接入完成：前端"给exalex发 test" → 11.1 秒送达（3/3 全绿）
+
+**里程碑**：技能接入手机 agent（意图路由 + 预编译技能），从前端同一 API（`POST /api/run`）三轮实测 **3/3 成功、0 误发**；修完计时后热态 **11.1s**（技能）/ ~12s（含 agent 启动），0 模型 0 视觉。
+
+**上机文件（4）**：`~/wx_intent.py`（意图解析·复用）· `~/wx_send.py`（技能 v2.3）· `~/mini_agent.py`（路由钩子）· `~/mini_console.py`（`ensure_portal()` 预检）。
+
+**三个新坑（详见取证 README）**：① **LD_LIBRARY_PATH 毒杀系统二进制**（console root 上下文 → screencap 0 字节，CANNOT LINK；正解=系统调用前剥 LD_LIBRARY_PATH/LD_PRELOAD）；② **搜狗中文组合态**（无发送键 → 点首候选提交；判据"深绿发送键 ⇔ 有已提交文字"）；③ **前台检测 `grep -m1` 拿到的第一行是影子屏** → 必须全文匹配（8.7s→1.1s）。
+
+**时间账（#3）**：起步-列表 2.5s → 定位 0.05 → 进会话+标题 1.4 → 打字 4.2 → 提交 1.2 → 发送+验证 1.7。
+**纪律**：wxsend 路由只在**测试模式·主屏可见**下生效（影子屏模式跳过）。
+**证据**：`logs/wechat_test/agent_route/`（README + 状态 JSON + 17:14 成功截图）。
+
+---
+
+## 9-29 晚 · 认错人事故 + 加固（用户实测逼出来的 v2.5→v2.9）
+
+**事故**（19:45 用户跑"给exalex发条微信 hello"）：列表被滚到旧会话区 → "微信支付"行宽 177px 落进 exalex 的过宽容差窗（±15%）→ 点错人 → 标题复核同一松窗又放行 → 在服务页/网页上盲点 ~8 处（打字/候选/空格全打空）→ 误入淘宝登录页（FLAG_SECURE，系统级禁截屏）→ 截图变黑/被拒 → 安全中止（**未发错消息**）。
+
+**加固（全部上机+验证）**：宽度窗收紧（首次±9% + 成功后指纹记忆 `~/bridge/wx_contacts.json`；中文估宽 36→43.5px/字）· 键盘硬闸门（`mInputShown`，没弹键盘=不许打字）· 取消一切盲点（候选/空格/发送键都必须先在屏幕上检测到；发送键加尺寸窗 [1500,3600]）· 列表滚动恢复（先滑到顶；**到顶标志=拉出微信「小程序面板」（暗比例 0.89）→ 上滑关闭**；找不到目标上滑翻页≤3屏）· 找不到=安全停。
+
+**验证**：安全停 ✓（0 点 0 输）· 送达 14.4s ✓（v2.9 全链路）· 滚动探针两场景 ✓（深位/顶部快路径 5.4s）。证据 `logs/wechat_test/agent_route/`（final_status7/8/9 + user_run_1945）。
+**音量下快捷键**：实测活着（sendevent 模拟物理键 → 服务日志 + 听写面板弹出，截图存证）；已把手机从怪状态清理回正常。
+
+---
+
+## 9-29 深夜 · "宽度≠身份"事故 → v3.0 身份确权（模板+视觉）三轮实测全绿
+
+**事故**（20:12 用户实测）：目标「微信团队」不在列表 → 宽度窗(158-189px)命中「微信支付」行(177px)——**两者都是 4 汉字、宽度几乎相同** → 标题校验（同为宽度比对）误判通过 → 在支付页戳输入框位×2 → 键盘闸门拦停（未输入未发送）→ 手机留在怪页（用户观感"又乱点了"）。
+
+**根因**：身份判据从头到尾=宽度；**宽度是位置，不是身份**。
+
+**v3.0（已上机+实测）**：
+- 未建档联系人 → **视觉读名单**（1 调用读全屏名字+坐标→精确匹配→点行）→ **视觉读标题**确权 → 存墨迹模板；
+- 已建档 → **标题墨迹网格**本地比对（96×24；阈值 差≤3.0/大格比≤0.02；标定：同名 0.0，异名≥63）；
+- 找不到 = **0 点击 0 输入干净停** + 自动回列表 + 终帧留证；视觉预算 ≤4 次/run。
+
+**实测**：A 微信团队→干净停（34.5s，0 点 0 输）｜B exalex 首建→送达（31.7s，2 视觉）｜C exalex 复跑→**模板 差=0.0，0 视觉，14.7s 送达**。
+**证据**：`logs/wechat_test/run_2012/`（README + final_A/B/C + 截图）；标定工具 `scripts/_title_calib.py`。
+**认知**：① 同标题跨运行墨迹网格差=0.0 → 渲染确定性，像素模板可行；② 标题带 y138-208（上方是状态栏污染区）、x150-770（左徽标/右图标之外）。
+
+---
+
+## 9-30 中午 · 入口 App v1.2：浮球=语音入口 / 状态栏任务进度 / 语音自动收键盘（全部上机实测）
+
+**① 浮球**（用户反馈"没啥用"→ 诊断=交互分工不清）：**单击 → 语音速记条**（路由与音量▾同款）；**长按 → 文字面板**；调试开关移出浮球（对话页 Web UI）。
+**② 状态栏进度**：Notifier+Poller 重写——任何任务类型都更新"正在干活…（第N步）· 已运行Xs·进度条"；修复"技能任务 step=0 从不更新"的旧 bug；跳过 `[wxsend] exec:` 行；运行中收起待命通知、结束恢复；空闲轮询 12s→4s。实测：运行中通知 ✓（13:38）、结束后结果+待命 ✓（13:51）。
+**③ 语音收键盘**：`VoiceBar.imeWatch`——识别文本稳定 3s/静默 20s → 自动收起输入法（实测 ✓ 13:37）；提交/取消也收。硬约束坐实：本机无系统 ASR（讯飞=仅TTS、LAN 模型拒音频、IME z序在 overlay 之上）→ 说话期间搜狗面板必须存在，只能"说完即收"。
+**④ 弹窗 UI**：3 方案 mockup 已交付（A 量子边框·四边流光 / B 太空舱·呼吸描边 / C 数据洪流·分段流光），待用户选型。
+
+**wx_send v3.1**（顺带上机）：兜底确权改模板优先（省一次视觉调用）；宽度窗 ±12；回顶后加"在列表"预检。实测：14.7s（模板0.0）/ 49.6s（两候选被拒→视觉兜底=完整安全链）。
+
+**事故**：测试中途展开通知栏干扰一轮（已加预检 + 纪律"运行中不碰通知栏"）；微信 zygote64 ART SIGSEGV 崩溃一次（平台级，已恢复）；FLAG_SECURE（淘宝登录页）再现（HOME 恢复）。
+**证据**：`logs/entry_ui/`（27 张）；APK v1.2（versionCode 3）；技能 v3.1。
+
+---
+
+## 10-01 凌晨 · 入口 App v1.7：顶部「任务栏」+ 提交飞行动画（用户需求："提交任务要有动画，从对话框把任务丢到任务栏；任务栏要接管进度"）
+
+**需求解读**：对照豆包手机的"顶部横条"（调研文档 §2 待办）——任务提交时从对话框"飞"进屏幕顶部的任务栏；只有一个任务在跑时，任务栏全程显示进度（"接管"）。
+
+**交付（全部上机实测）**：
+1. **`TaskBar.java`（新）**——屏幕顶部居中"任务进度横条"（深色玻璃药丸 + 冰蓝描边，912x162px@1080）：
+   - 两行：任务名 + 「第 N 步 · Xs」（右）；副行=最新动作（剥 `[step N]`/`[agent]` 前缀）；
+   - 动效：顶部滑入（Overshoot）+ 描边落地脉冲 + 呼吸点 + 底部流光循环（1.7s 相位）；
+   - 结果态：`✔ 完成 / ⚠ 未完成 / ⏹ 已停止` + 描边变绿/橙，停留 3.4/4.6/2.4s 自动收起；
+   - 数据双路：`kickoff()`（语音/面板提交时立即点亮，不等轮询）+ Poller（每 2s 状态驱动）；含"窗口意外脱离自愈"（isAttachedToWindow 检测重挂）。
+2. **`FlyView.java`（新）**——提交"飞行动画"：任务胶囊（深色玻璃+蓝边+任务文字）从对话框/面板输入框起飞，二次贝塞尔弧线飞向任务栏落点，720ms（PathInterpolator），缩到 0.3 淡出；到 88% 时触发 `TaskBar.landed()` 落地脉冲。载体=全屏透明不可触摸 a11y overlay，动画完自动移除。
+3. **集成**：`VoiceBar.submit()` / `PanelBinder.doSubmit()` 成功分支 → `TaskBar.kickoff + FlyView.launch`（面板/语音两条原生路径）；`chat_ui.py` 对话页 → 新增 `.flypill` Web 动画（输入框 → 屏幕顶部中央，660ms，WAAPI）。
+4. **Poller 提速**：空闲轮询 4s→2s（对话页提交后任务栏 ≤2s 内亮起）；`[step N]`/`[agent]` 前缀剥离；诊断日志保留（tag `xgt-taskbar`，每任务 4-6 行）。
+
+**实测矩阵（全绿）**：
+| 场景 | 证据 |
+|---|---|
+| 运行态（第 N 步 · Xs + 流光） | 日志 step1→10 连续 + 截图（"第 7 步 · 35s"），像素级测得横条 912px 居中 |
+| kickoff"启动中…/正在准备…" | 录屏帧 T=9.10s |
+| 飞行动画 | 录屏帧 T=8.93s（胶囊在输入框位置起飞）→ 面板淡出 → 任务栏"启动中" |
+| 结果态 + 自动收起 | 截图 6 连（亮度 91.5→58.8→91.5）+ 日志 |
+| 服务重启后（kill+设置重写） | 新进程 29985 一轮正常 |
+| 安装后自动重建进程 | 18314/31680 均正常 |
+| Web 动画（playwright 采样） | 7/26 采样命中，轨迹 (43,706)→(169,86)→(176,64)，0 JS 错误 |
+| 对话页部署 | `chat_ui.py` 已上机（diff 确认仅新增动画部分）+ console 重启自检 200 |
+
+**部署链（可复用）**：chat_ui.py → `adb push /data/local/tmp` → `su cp` 到 `~/.termux home`（root:root 700，mini_console.py `import chat_ui`）→ `su -c "bash ~/start-console.sh"` 重启 console（pkill+Popen+自检）。
+
+**坑与观察**：
+- **安装 v1.7 后的一代进程（9027）TaskBar 两轮未显示**（日志静默、无崩溃、服务功能正常）——后续 4 代进程（重装/重启）均复现不出；已加"失败路径日志 + 窗口自愈"防复现，**列为观察项**。
+- `su kill` 杀 a11y 进程后 **ColorOS 不会自动拉起服务** → 用 `settings put enabled_accessibility_services`（先仅 portal 再 portal+小工头）触发重绑；**用户日常重装 APK 后如遇浮球/任务栏不动，按此拉回**（supervisor 5 分钟也会兜）。
+- `shell` 用户跑 `screenrecord` 段错误（RC=139）——**已知坑复发**：录像一律 `su -c`。
+- logcat 用 `-t N 行` 过滤会被系统日志挤掉 → 用 `-d` 全量 + grep，或加大窗口。
+
+**产物**：APK v1.7.2（versionCode 12）已装机；`scripts/chat_ui.py`（已上机）；探针 `scripts/_probe_fly_anim.mjs`；演示视频 `logs/entry_ui/v17_demo_fly.mp4`（3.8s）+ 全片 `v17_fly2.mp4`（12s）；截图 `v17_tc_5.png`（结果态）、`v17_run1.png`（运行态）、`v17_web_fly.png`（Web 动画）。
+
+---
+
+## 10-01 凌晨 · pi 进手机：后台架构盘点 + 可行性分析【待拍板】
+
+**需求**：「现在框架里手机后台到底有哪些架构，画个架构图。想把 pi 部署进手机，这样可以执行工作流，而不是单次请求 api（智力不够）。」
+
+**产出**：`pi进手机-后台架构分析与方案.md`（六层盘点 + 实测证据 + 四期方案 + 拍板项）。
+
+**核心结论**：
+- 现役后台 = 六层自包含体系（入口/控制/执行/手眼/数据/外脑）；常驻件生存前提 = **root 域 + 无障碍**两把「免冻护身符」。
+- **四个关键可行性点今天全部实测消掉**：① pi 官方支持 Termux（docs/termux.md）；② Termux 源 nodejs **26.4.0**（要求 ≥22.19）；③ 局域网 qwen（dgx）**支持 function calling**（tool_calls 实测、热态 1.02s）；④ pi 0.82.1 + dgx **工具循环干跑 rc=0**（2 次 bash 调用 + 汇总，65s）。
+- 坑（已沉淀）：pi 连 LAN 模型在带代理环境会**静默挂起**（NO_PROXY 空 / CIDR 不被 undici 认）→ 运行时清代理 env 即通。已补进技能 `clash-proxy-lan-triage`。
+- 方案骨架：P0 手机装 pi 冒烟（半天）→ P1 工具桥 ptool + phone-control 技能（1~2 天）→ P2 接入控制台做「快慢双轨」路由（2~3 天）→ P3（选做）移植 piHarness 工作流引擎（3~5 天）。
+- 现状核对（adb）：入口 APK v1.7.2（vc12；当日已升 **v1.7.3** 含 Pi 芯片，见下午修复轮）；存储剩 59G；console(root) + shadow_client 运行中。
+
+**状态**：待拍板（形态 / 权限边界 / 常驻方式 / 版本对齐，建议倾向见文档 §7）。
+
+---
+
+## 10-01 中午 · pi 进手机：P0~P2 全量落地 ✅（用户「开始吧」放行）
+
+**一句话**：pi 0.82.1 装进手机 root 域（Node 26.4.0）；`ptool` 工具桥把手机操作封装给 pi；控制台新增「Pi」模式——发任务即走 pi，**结果照常入库/通知**（快慢双轨齐活）。
+
+**P0 · 手机装 pi**：
+- Termux 侧两堵墙实测：① apt **永久禁 root**（"Ability to run this command as root..."）；② `su 10353` 会话 **DNS 挂**（app 上下文才有网络）→ 定案 **离线 deb 路线**（root 下载 + sha256 校验 → Termux 用户 `dpkg -i`）。
+- 依赖闭包：c-ares / libicu / nodejs 26.4.0 / git / npm 11.20 + **openssl 3.6.3 / libc++ 30 / zlib 1.3.2 升级**（node 缺 `OSSL_PROVIDER_add_conf_parameter` 符号→CANNOT LINK，升级后解决）；openssl conffile 交互坑用 `--force-confnew` 过。
+- pi 运行时：PC 干净 npm 装 0.82.1 → tar（23MB）→ 推手机解包 `~/pi-runtime`；配置 `~/.pi/agent/{models.json,settings.json}`（dgx 局域网 + hdd 云）。
+- 冒烟：`pi -p --provider dgx` 工具循环 **rc=0 / 24s**。
+
+**P1 · 工具桥**：
+- `~/bridge/tools/ptool.py`（state/tap/swipe/text/key/open/shot/battery/apps/front/**wx-send**；主屏+影子屏双模式）；
+- `~/.pi/agent/skills/phone-control/SKILL.md` + `~/pi-work/AGENTS.md`（纪律与红线写进技能，渐进式披露）。
+- 验收：pi 独立读电量 **22s 全对**（level/充电/温度）。
+
+**P2 · 控制台双轨**：
+- `mini_console.py`：`mode=pi` 分支（spawn `~/pi-runtime/pi -p --name console-<rid>`，env 去 LD_LIBRARY_PATH、cwd=~/pi-work）+ `parse_run(pi_mode)` 取尾部文本作结果 + 页面「Pi」芯片；`chat_ui.py` 加「Pi 深度」chip。
+- 端到端：`POST /api/run {"mode":"pi"}` → **26.6s done**（engine=pi、结果入库）；双轨回归：auto（老链路 jev 18s）与 pi（新链路 9s）先后跑通。
+
+**关键坑（本阶段）**：Termux apt 禁 root；su-10353 无 DNS；node 需 openssl≥3.6；dpkg conffile 交互；`pgrep -f`/`pkill -f` **自匹配**（脚本名含关键字→按 PID 杀）；pi 输出无 `[agent]` 标记（console 解析适配）；Windows→adb→su 三层引号必碎（一律走脚本文件 + LF）。
+**脚本与文件**：`scripts/pi_phase/`（README 含完整可复现流程）；手机侧 `~/pi-runtime/`、`~/pi-work/`、`~/.pi/agent/`、`~/bridge/tools/ptool.py`。
+**待办**：① 真机推磨更多 pi 任务（微信发送走 ptool wx-send 验收）；② 影子屏模式下 pi 任务实测；③ P3（工作流引擎移植）待拍板。
+
+---
+
+## 10-01 下午 · 修复轮：语音意图路由 + 步数上限 100 + APK「Pi」芯片（v1.7.3 / vc13）✅
+
+**起因**：用户实测「呃，发条微信给EXLEX test。」（12:38，auto 模式）**25 步耗尽失败（240s）**。诊断三因：
+1. 句首 **"呃，"** 让 `wx_intent` 整句失配 → 没走"给X发Y"技能直通 → 进入通用循环；
+2. 恰好落在微信（a11y 被屏蔽、portal 报 `root filtered out`）→ 感知为空 → open_app/wait 空转到 25 步；
+3. 目标名 **"EXLEX" 疑似 "EXALEX" 的语音误识别**（真名 EXALEX）——即便路由成功也会干净停（安全）。
+
+**修复（4 件，全部落地）**：
+1. `wx_intent.py`：新增 `strip_lead_noise()`——句首语音口癖/客套清理（呃/嗯/那个/帮我/请/我想…，最多 4 轮；不含"给/发"结构词）。新事故样本+老用例断言全过。
+2. 步数上限 **25 → 100**：`mini_console.py`（spawn 参数）+ `mini_agent.py`（默认值 2 处）。
+3. 入口 APK **v1.7.3 (vc13)**：面板模式芯片新增「Pi」（`activity_panel.xml` + `PanelBinder.java`）；**浮球/音量键语音路径从此也能选 Pi**（走 Prefs.mode，持久化）。
+   ⚠️ **版本号提醒（多会话共享目录）**：vc13 已被本轮占用——**光效 v3 轮请从 vc14 / v1.7.4 起**。
+4. `phone-control` 技能 + `AGENTS.md`：新增「一次运行=无人值守」纪律——不以提问结尾；"给X Y"切分惯例（X=首名、Y=其余）；名字找不到**不得自动改名重发**，给候选待确认。
+
+**复测（用户原句，全绿）**：
+- **auto**：29.05s 直通技能 → **干净停**（0 点击 0 输入），失败原因明确："名单里没有「EXLEX」…（28.5 秒，安全中止）"——对比旧版 240s/25 步毫无结论。
+- **pi（指引更新前）**：15.9s 但以提问结尾（误把"test"当名字一部分）→ 暴露缺口。
+- **pi（指引更新后）**：96.2s 完整闭环——正确切分 `--to EXLEX --text test` → 走 wx-send 安全链 → 翻两屏未找到 → 干净停 → 报告"未发送（干净停 rc=6）"，并给候选 **EXALEX**（"需你确认，我不会自行改名重发"）。
+
+**产物**：`scripts/pi_phase/`（`test_round2.sh` / `test_pi_retry.sh` / `deploy_fix_round.sh`；README 已更新）；APK `entry/dist/xiaogongtou-entry.apk`（v1.7.3）。
+
+---
+
+## 10-01 晚 · 排查「动不动跳淘宝登录页」：定位 = 淘宝后台弹页 + 关闭其权限 ✅
+
+**现象**（用户 bug 清单 #1）：手机（LE2110）日常使用中"动不动"自动跳到淘宝登录页。
+**定位**：非系统故障、非我方系统——**淘宝 App 自己「后台弹页」**（`com.ali.user.mobile.login.ui.UserLoginActivity` 被直接弹到前台）；本机 `appops` 给淘宝 `BACKGROUND_START_ACTIVITY: allow`（ColorOS"后台弹出界面"放行）＝ 通行证。
+
+**证据（android events buffer，40 分钟窗口 4 次）**：17:12:55 / 17:18:31 / 17:20:32 / 17:32:45 —— 每次均为"淘宝进程被系统/推送复活（`heytap.mcssdk.AppPushService` ×2、清理/死亡后系统调度重启 ×2）→ 1~3s 内弹登录页 → 顶掉前台 App（夸克×2、天气×1）→ 自关或用户按返回"。窗口内淘宝**零通知入队**（排除点通知）；同期 console/bridge 无任务、全记录 grep taobao 零命中（排除我方系统）。第 3 次连带拉起支付宝"一键登录"组件（`AliAuthLoginContentProvider`）。
+
+**处置（用户指令执行）**：`appops set com.taobao.taobao BACKGROUND_START_ACTIVITY deny` + `SYSTEM_ALERT_WINDOW deny`（shell 即可，无需 root）→ 双 deny ✓；回滚 = `default`。
+**验证（已收官）**：观察哨覆盖 16:58~18:19 完整事件史（`logs/taobao_pop/events_watch.log`）——修复前 40 分钟弹 4 次；**修复后 41 分钟零弹页** ✓（观察哨 18:20 按用户要求停止）。
+
+**档案**：`淘宝后台弹页-诊断.md`（根目录，含复核命令）；证据 `logs/taobao_pop/`。
