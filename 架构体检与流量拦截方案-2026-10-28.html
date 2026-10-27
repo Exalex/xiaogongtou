@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小工头 · 架构体检与取数方案（2026-10-28）</title>
+<style>
+  :root{
+    --bg:#F6F7F9; --card:#FFFFFF; --ink:#111827; --ink2:#4B5563; --ink3:#8B93A1;
+    --line:#E4E7EC; --blue:#1F5FD6; --blue-bg:#EDF3FE;
+    --red:#B42318; --red-bg:#FEF3F2; --amber:#B54708; --amber-bg:#FFFAEB;
+    --green:#067647; --green-bg:#ECFDF3; --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    font-size:15px; line-height:1.72; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1020px;margin:0 auto;padding:56px 32px 96px}
+  /* header */
+  .kicker{font-size:12px;letter-spacing:.14em;color:var(--ink3);text-transform:uppercase;font-weight:600}
+  h1{font-size:34px;line-height:1.28;letter-spacing:-.02em;margin:12px 0 10px;font-weight:700}
+  .meta{font-size:13px;color:var(--ink3);display:flex;gap:14px;flex-wrap:wrap;margin-bottom:34px}
+  .meta span{display:inline-flex;align-items:center;gap:6px}
+  /* verdict */
+  .verdict{background:var(--ink);color:#fff;border-radius:14px;padding:26px 30px;margin-bottom:14px}
+  .verdict h2{font-size:13px;letter-spacing:.12em;font-weight:600;color:#9CA3AF;text-transform:uppercase;margin-bottom:16px}
+  .verdict ol{list-style:none;display:grid;gap:12px}
+  .verdict li{display:flex;gap:12px;font-size:16px;line-height:1.65;color:#F3F4F6}
+  .verdict li b{color:#fff;font-weight:600}
+  .num{flex:0 0 22px;height:22px;border-radius:6px;background:rgba(255,255,255,.14);
+       font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:3px;color:#fff}
+  /* sections */
+  section{margin-top:52px}
+  .sec-head{display:flex;align-items:baseline;gap:12px;border-bottom:2px solid var(--ink);padding-bottom:10px;margin-bottom:24px}
+  .sec-no{font-family:var(--mono);font-size:13px;color:var(--ink3);font-weight:600}
+  .sec-head h2{font-size:22px;font-weight:700;letter-spacing:-.01em}
+  h3{font-size:16px;font-weight:650;margin:28px 0 10px}
+  p{margin-bottom:14px;color:var(--ink2)}
+  p.lead{color:var(--ink);font-size:15.5px}
+  b{font-weight:650;color:var(--ink)}
+  code{font-family:var(--mono);font-size:.88em;background:#F1F3F6;border:1px solid var(--line);
+       padding:1px 5px;border-radius:4px;color:#1F2937;white-space:nowrap}
+  /* figure */
+  figure{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 20px 16px;margin:22px 0}
+  figcaption{font-size:12.5px;color:var(--ink3);margin-top:12px;padding-top:12px;border-top:1px dashed var(--line);line-height:1.6}
+  /* table */
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);
+        border-radius:12px;overflow:hidden;font-size:13.5px;margin:18px 0}
+  th{background:#FAFBFC;text-align:left;padding:11px 14px;font-weight:650;font-size:12.5px;
+     color:var(--ink2);border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:11px 14px;border-bottom:1px solid #F0F2F5;vertical-align:top;color:var(--ink2);line-height:1.6}
+  tr:last-child td{border-bottom:0}
+  td.k{color:var(--ink);font-weight:600;white-space:nowrap}
+  /* tags */
+  .tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 7px;border-radius:5px;
+       font-family:var(--mono);letter-spacing:.02em}
+  .p0{background:var(--red-bg);color:var(--red)}
+  .p1{background:var(--amber-bg);color:var(--amber)}
+  .p2{background:#F1F3F6;color:var(--ink2)}
+  .ok{background:var(--green-bg);color:var(--green)}
+  .no{background:var(--red-bg);color:var(--red)}
+  .mid{background:var(--amber-bg);color:var(--amber)}
+  /* plan cards */
+  .plans{display:grid;gap:16px;margin:22px 0}
+  .plan{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--ink3);
+        border-radius:12px;padding:20px 22px}
+  .plan.a{border-left-color:var(--blue)}
+  .plan.b{border-left-color:var(--green)}
+  .plan.c{border-left-color:var(--amber)}
+  .plan .ph{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .plan .ph .lbl{font-family:var(--mono);font-size:11px;font-weight:700;width:22px;height:22px;border-radius:6px;
+                 display:flex;align-items:center;justify-content:center;background:#F1F3F6;color:var(--ink2)}
+  .plan h4{font-size:16.5px;font-weight:700}
+  .plan .onel{font-size:15px;color:var(--ink);margin-bottom:12px;font-weight:550}
+  .plan .scene{font-size:13.5px;color:var(--ink2);background:#FAFBFC;border-radius:8px;padding:11px 14px;
+               border:1px solid #F0F2F5;margin-bottom:12px}
+  .plan .scene b{color:var(--ink2);font-weight:650}
+  .plan dl{display:grid;grid-template-columns:66px 1fr;gap:6px 12px;font-size:13px;color:var(--ink2)}
+  .plan dt{color:var(--ink3);font-weight:600}
+  /* callout */
+  .callout{border-radius:12px;padding:18px 22px;margin:20px 0;font-size:14px;line-height:1.7}
+  .callout .t{font-weight:700;font-size:13px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
+  .c-red{background:var(--red-bg);border:1px solid #FDA29B;color:#7A271A}
+  .c-red .t{color:var(--red)}
+  .c-blue{background:var(--blue-bg);border:1px solid #C7D9FB;color:#16325C}
+  .c-blue .t{color:var(--blue)}
+  .c-green{background:var(--green-bg);border:1px solid #A9E5C2;color:#054F31}
+  .c-green .t{color:var(--green)}
+  .c-blue b,.c-green b,.c-red b{color:inherit}
+  ul.tight{list-style:none;display:grid;gap:8px;margin:12px 0}
+  ul.tight li{padding-left:18px;position:relative;font-size:14px;color:var(--ink2);line-height:1.65}
+  ul.tight li:before{content:"—";position:absolute;left:0;color:var(--ink3)}
+  /* steps */
+  .steps{display:grid;gap:0;margin:20px 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card)}
+  .step{display:grid;grid-template-columns:112px 1fr;gap:16px;padding:14px 18px;border-bottom:1px solid #F0F2F5;align-items:start}
+  .step:last-child{border-bottom:0}
+  .step .sn{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--blue);padding-top:2px}
+  .step .sb{font-size:13.5px;color:var(--ink2)}
+  .step .sb b{color:var(--ink)}
+  footer{margin-top:64px;padding-top:22px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink3);line-height:1.8}
+  @media(max-width:760px){.wrap{padding:32px 18px 64px}h1{font-size:26px}.verdict li{font-size:14.5px}
+    .step{grid-template-columns:1fr;gap:4px}table{font-size:12.5px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="kicker">架构体检 · 2026-10-28</div>
+  <h1>小工头：现在的真实架构、它的问题，<br>以及「装个 Surge 拦流量」到底值不值</h1>
+  <div class="meta">
+    <span>联想 YT-K606F / 一加 9</span><span>端侧 mini_agent 4359 行</span>
+    <span>决策模型 qwen3.8-flash-next</span><span>已发布 v1.9.0</span>
+  </div>
+
+  <div class="verdict">
+    <h2>先说结论</h2>
+    <ol>
+      <li><span class="num">1</span><span>这套东西<b>能用了</b>：微博热搜 5 步 31 秒、B站排行榜 4 步 44 秒、连续 5 次任务零浪费。但它是<b>「手机是手和眼，电脑是脑」</b>——脑和嘴（大模型、语音转写）都在局域网 PC 上，出门断 WiFi 就干不了活。</span></li>
+      <li><span class="num">2</span><span>最大的问题不在模型笨，在<b>工程地基</b>：仓库里有两份同名 Agent 代码，差 1050 行；系统不知道自己「看不清屏幕」（a11y 只覆盖 39% 屏宽）；失败原因靠人读日志总结。这三件事不修，后面加什么能力都会打折。</span></li>
+      <li><span class="num">3</span><span><b>「装 Surge 拦流量拿 API」能做，但不是你要的答案。</b>你举的微博热搜，官方网页接口 <code>weibo.com/ajax/side/hotSearch</code> 不用登录就返回 JSON——一次 GET 就够，不用 root、不用装证书、不用碰手机。拦包是留给「App 里才有、还读不到」的那一小撮数据。</span></li>
+    </ol>
+  </div>
+
+  <!-- ============ 1 现状 ============ -->
+  <section>
+    <div class="sec-head"><span class="sec-no">01</span><h2>现在这套东西到底长什么样</h2></div>
+
+    <p class="lead">一句话：<b>手机上跑「手和眼」，电脑上跑「脑和嘴」，中间靠 WiFi 连。</b>手机负责看屏幕、点屏幕、听你说话；真正决定「下一步点哪」的模型和一键转写语音的服务，都不在手机上。</p>
+
+    <figure>
+      <svg viewBox="0 0 1000 560" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,Microsoft YaHei,sans-serif">
+        <defs>
+          <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#B42318"/>
+          </marker>
+          <marker id="arg" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#8B93A1"/>
+          </marker>
+        </defs>
+
+        <!-- 手机框 -->
+        <rect x="24" y="70" width="516" height="440" rx="14" fill="#FFFFFF" stroke="#111827" stroke-width="1.6"/>
+        <text x="44" y="96" font-size="13.5" font-weight="700" fill="#111827">手机端（在手机上本地运行的部分）</text>
+        <text x="524" y="96" font-size="10.5" fill="#8B93A1" text-anchor="end">横屏 2160×1350</text>
+
+        <!-- 入口 APK -->
+        <rect x="44" y="108" width="476" height="74" rx="9" fill="#EDF3FE" stroke="#C7D9FB"/>
+        <text x="58" y="128" font-size="12.5" font-weight="700" fill="#16325C">入口 APK「小工头」1.9 (vc15)</text>
+        <text x="58" y="147" font-size="11" fill="#3E4C63">浮球 · 音量下键语音条 · 通知 · TaskBar 进度胶囊</text>
+        <text x="58" y="164" font-size="11" fill="#3E4C63">无障碍服务（读屏/点击） · LaunchApi :8901（无 root 启动 App 唯一通路）</text>
+
+        <!-- 控制台 -->
+        <rect x="44" y="192" width="476" height="50" rx="9" fill="#F7F8FA" stroke="#E4E7EC"/>
+        <text x="58" y="211" font-size="12.5" font-weight="700" fill="#111827">控制台 mini_console.py :8900（Termux）</text>
+        <text x="58" y="229" font-size="11" fill="#4B5563">任务队列 · 历史 · 调试开关 · 链路 trace 回看</text>
+
+        <!-- Agent -->
+        <rect x="44" y="252" width="476" height="116" rx="9" fill="#FFFFFF" stroke="#111827" stroke-width="1.4"/>
+        <text x="58" y="271" font-size="12.5" font-weight="700" fill="#111827">Agent 主循环 mini_agent.py　4359 行</text>
+        <text x="58" y="290" font-size="11" fill="#4B5563">关卡〇 开工闸门 · 关卡一 起点归位 · 关卡二 脚本重放 · 关卡二' 规划骨架</text>
+        <text x="58" y="307" font-size="11" fill="#4B5563">关卡三 子目标步进 · 关卡四 收工复核　（常规步 0 模型，只在三处叫模型）</text>
+        <rect x="58" y="318" width="448" height="38" rx="6" fill="#FAFBFC" stroke="#F0F2F5"/>
+        <text x="70" y="334" font-size="10.5" fill="#8B93A1">每步：读屏幕 → 解析元素名成坐标 → 执行 → 三级锚点核对（包名 / 像素指纹 / 特征词）</text>
+        <text x="70" y="349" font-size="10.5" fill="#8B93A1">核对不过 → 本地恢复（重试 / 换入口 / 返航）→ 仍不过才交模型</text>
+
+        <!-- portal -->
+        <rect x="44" y="378" width="476" height="48" rx="9" fill="#F7F8FA" stroke="#E4E7EC"/>
+        <text x="58" y="397" font-size="12.5" font-weight="700" fill="#111827">portal :8080（无障碍桥，Bearer token 每台不同）</text>
+        <text x="58" y="415" font-size="11" fill="#4B5563">/state_full 读树 · /screenshot 截屏 · /tap /swipe · /keyboard/input</text>
+
+        <!-- 技能库 -->
+        <rect x="44" y="436" width="476" height="52" rx="9" fill="#ECFDF3" stroke="#A9E5C2"/>
+        <text x="58" y="455" font-size="12.5" font-weight="700" fill="#054F31">技能库 ~/bridge/skills（资产，但全靠手工标定）</text>
+        <text x="58" y="473" font-size="11" fill="#067647">app_anchors.json 坐标锚点 · app_paths.json 导航路径 · examples.json 经验 · scripts/ 固化脚本</text>
+
+        <!-- PC 框 -->
+        <rect x="700" y="70" width="276" height="440" rx="14" fill="#FFFFFF" stroke="#B42318" stroke-width="1.6" stroke-dasharray="0"/>
+        <text x="716" y="96" font-size="13.5" font-weight="700" fill="#B42318">局域网 PC（spark01 / .75）</text>
+        <text x="960" y="96" font-size="10.5" fill="#8B93A1" text-anchor="end">脑与嘴都在这</text>
+
+        <rect x="716" y="118" width="244" height="92" rx="9" fill="#FEF3F2" stroke="#FDA29B"/>
+        <text x="730" y="138" font-size="12.5" font-weight="700" fill="#7A271A">qwen3.8-flash-next :8888</text>
+        <text x="730" y="157" font-size="11" fill="#7A271A">vLLM，单步中位 3.4s / P90 4.9s</text>
+        <text x="730" y="175" font-size="11" fill="#7A271A">规划 B1 · 异常恢复 B2 · 答案汇总</text>
+        <text x="730" y="196" font-size="10.5" fill="#B42318" font-weight="600">没有它 → 手机不会思考</text>
+
+        <rect x="716" y="226" width="244" height="76" rx="9" fill="#FEF3F2" stroke="#FDA29B"/>
+        <text x="730" y="246" font-size="12.5" font-weight="700" fill="#7A271A">ASR :8766</text>
+        <text x="730" y="264" font-size="11" fill="#7A271A">语音转文字（计划任务常驻）</text>
+        <text x="730" y="285" font-size="10.5" fill="#B42318" font-weight="600">没有它 → 语音入口变哑巴</text>
+
+        <rect x="716" y="318" width="244" height="58" rx="9" fill="#F7F8FA" stroke="#E4E7EC"/>
+        <text x="730" y="337" font-size="12.5" font-weight="700" fill="#6B7280">Jev（TypeSafe System One）</text>
+        <text x="730" y="355" font-size="11" fill="#8B93A1">返回 451，已判死 → 每次运行自动跳过</text>
+        <text x="730" y="370" font-size="10.5" fill="#B54708">「双脑」实际只剩单脑</text>
+
+        <rect x="716" y="396" width="244" height="92" rx="9" fill="#FFFAEB" stroke="#FDB022"/>
+        <text x="730" y="415" font-size="11.5" font-weight="700" fill="#B54708">影子屏（不占你的屏幕）</text>
+        <text x="730" y="433" font-size="10.5" fill="#B54708">9-27 四层机制真机全通：</text>
+        <text x="730" y="449" font-size="10.5" fill="#B54708">造屏 / 摆窗口 / 送手指 / 跨屏读树</text>
+        <text x="730" y="468" font-size="10.5" fill="#B54708" font-weight="600">POC 还没做，能力没兑现</text>
+
+        <!-- 跨网箭头 -->
+        <line x1="540" y1="184" x2="714" y2="158" stroke="#B42318" stroke-width="1.6" marker-end="url(#ar)"/>
+        <text x="618" y="164" font-size="10.5" fill="#B42318" font-weight="700" text-anchor="middle">① 每步决策</text>
+        <text x="618" y="178" font-size="10" fill="#8B93A1" text-anchor="middle">HTTP / WiFi</text>
+
+        <line x1="540" y1="232" x2="714" y2="262" stroke="#B42318" stroke-width="1.6" marker-end="url(#ar)"/>
+        <text x="618" y="240" font-size="10.5" fill="#B42318" font-weight="700" text-anchor="middle">② 语音转写</text>
+        <text x="618" y="292" font-size="10" fill="#8B93A1" text-anchor="middle">结果沿同一条通路返回</text>
+
+        <text x="24" y="540" font-size="11.5" fill="#B42318" font-weight="600">红线：两条通路都要到 PC 才能干活 —— 出门、断 WiFi、PC 没开机，手机既不会想也不会听。</text>
+      </svg>
+      <figcaption>图 1 · 实测还原的当前架构。橙色/红色框是「离开 PC 就不成立」的部分；黄色框是「已经验证但还没做出来」的部分。所有行号与开关名取自 <code>tabletbrain/mini_agent.py</code>。</figcaption>
+    </figure>
+
+    <h3>和 README 写的不一样的两处（需要更新）</h3>
+    <ul class="tight">
+      <li>README 写「双脑决策 Jev + qwen」——<b>Jev 已返回 451 被判死</b>，代码里改成「写文件缓存、此后所有运行跳过 Jev」，实际是单脑。</li>
+      <li>README 写「整条链路全部运行在手机本地，不需要电脑」——<b>模型和 ASR 都在 PC 上</b>。真正本地的只有感知、执行、技能库和调度。</li>
+    </ul>
+  </section>
+
+  <!-- ============ 2 问题 ============ -->
+  <section>
+    <div class="sec-head"><span class="sec-no">02</span><h2>现在有什么问题</h2></div>
+
+    <p class="lead">按「修不修得动、拖下去多贵」排序，不是按新旧排序。<b>P0 是不修就会持续白干活的，P1 是拖住产品形态的，P2 是卫生问题。</b></p>
+
+    <table>
+      <thead><tr><th style="width:64px">级别</th><th style="width:190px">问题</th><th>证据（可核对）</th><th style="width:210px">拖下去的代价</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="tag p0">P0</span></td>
+          <td class="k">两份真源在漂移</td>
+          <td><code>tabletbrain/mini_agent.py</code> 4359 行 vs <code>scripts/mini_agent.py</code> 3309 行，diff 1181 行。手机上跑的是前者，仓库里此前只跟踪了后者那一代的旧副本。</td>
+          <td>改错边等于白改。今天已全量入库并打 tag，但两份文件还在，随时会再分叉。</td>
+        </tr>
+        <tr>
+          <td><span class="tag p0">P0</span></td>
+          <td class="k">系统不知道自己「瞎了」</td>
+          <td>酷安任务 15 步空转：a11y 树只覆盖 x=658..1502，屏宽 2160，<b>仅 39%</b>。模型以为看到全屏，往树外瞎点。B站 HD 搜索栏是自绘控件，82 个元素里完全没有它。</td>
+          <td>每漏一块区域，就多一批「模型看起来在犯傻」的失败。这类失败最容易被误判成模型能力问题。</td>
+        </tr>
+        <tr>
+          <td><span class="tag p0">P0</span></td>
+          <td class="k">脑和嘴都挂在 PC 上</td>
+          <td><code>LLM_BASE=192.168.3.75:8888</code>、ASR <code>:8766</code>，都在 spark01。jev 已死，没有第二个脑可降级。</td>
+          <td>「出门可用」「随身助手」这两个产品前提不成立；PC 一关机，入口 App 还在、能力全没了。</td>
+        </tr>
+        <tr>
+          <td><span class="tag p1">P1</span></td>
+          <td class="k">失败说不清是哪一类</td>
+          <td>9 类失败模式（感知/决策/正确性/App 限制）是人读日志总结的。trace 有原始记录，但没有自动打标，<code>metrics.py</code> 只出浪费率。</td>
+          <td>每轮迭代都要人肉复盘一遍；回归时看不出「这次退步退在哪一类」。</td>
+        </tr>
+        <tr>
+          <td><span class="tag p1">P1</span></td>
+          <td class="k">技能资产全靠手工</td>
+          <td>锚点要手标坐标、导航路径要手写 dict、固化脚本要跑通两次才转正。自动发现做过（appmap，探索地图），两轮 n=3 均净负（+0.7 步 / +8s），默认关。</td>
+          <td>换一个 App 就要重新标一遍，App 规模上不去。这是「只能跑通 5 个 App」和「能跑通 50 个」的分界线。</td>
+        </tr>
+        <tr>
+          <td><span class="tag p1">P1</span></td>
+          <td class="k">影子屏只验了没做</td>
+          <td>9-27 四层机制六项全过（造屏 / 摆窗口 / 送手指 / 跨屏读树 / 主屏不受影响 / 收尾干净），POC 待办至今挂着。</td>
+          <td>「不占屏」是这套方案对豆包的核心差异点，现在还是文档而不是功能。</td>
+        </tr>
+        <tr>
+          <td><span class="tag p2">P2</span></td>
+          <td class="k">目录卫生</td>
+          <td><code>scripts/</code> 下 89 个未跟踪文件，其中 <code>_launch_big1..5.sh</code>、<code>_launch_hard1..3.sh</code>、<code>_mobile_probe1..2.py</code>、<code>mini_agent.py.new</code> 等 ≥40 个是一次性脚本。两份 <code>mini_console.py</code> 同样不同步。</td>
+          <td>找东西变慢，新人（或下次的你）分不清哪个是活的。</td>
+        </tr>
+        <tr>
+          <td><span class="tag p2">P2</span></td>
+          <td class="k">入口权限链脆弱</td>
+          <td>ZUI 关联启动拦 LaunchApi（<code>AutoRunService status=0</code>）；a11y 写 settings 不绑定、必须手开；<code>am force-stop</code> 会摘服务；靠 <code>supervisor-loop.sh</code> 5 分钟自愈兜底。</td>
+          <td>每次换机/重启都可能要人手动恢复。自愈是补救，不是解决。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout c-blue">
+      <div class="t">一个反直觉的判断</div>
+      上面 8 条里，<b>没有一条是「模型不够聪明」</b>。10-22 那轮的结论是「模型能力不是瓶颈，信息缺失才是」——这一轮看完代码，判断不变：把 a11y 读不到的事实补进 prompt，收益远大于换更强的模型。
+    </div>
+  </section>
+
+  <!-- ============ 3 三套方案 ============ -->
+  <section>
+    <div class="sec-head"><span class="sec-no">03</span><h2>三套改进方案</h2></div>
+
+    <p class="lead">三套不互斥，但人手有限必须排顺序。<b>每套我只用一句话说清它干什么，再用一个生活场景说清它解决什么。</b></p>
+
+    <div class="plans">
+
+      <div class="plan a">
+        <div class="ph"><span class="lbl">A</span><h4>先把现在这套修好</h4></div>
+        <div class="onel">不添新能力，先填三个坑：两份代码合成一份、系统能自报「我看不清」、失败自动分类。</div>
+        <div class="scene"><b>生活场景：</b>饭馆菜已经能炒了，但后厨放着两本不一样的菜谱、监控有死角、客人投诉时说不清是哪一步出的错。先把这三件事理顺，再谈开分店。</div>
+        <dl>
+          <dt>具体做</dt><dd>① <code>tabletbrain/</code> 定为唯一真源，<code>scripts/</code> 只留 PC 侧工具（删同名副本）② 每步上报「覆盖了多少元素 / 占屏宽多少」，低于阈值就换通道或截图兜底，并把「感知不全」写进 prompt ③ trace 自动打上 9 类标签，metrics 出分类报表</dd>
+          <dt>成本</dt><dd>约 1 周，纯改造，不动架构</dd>
+          <dt>收益</dt><dd>立刻可量：同类失败不再重复发生；回归能定位到类别</dd>
+          <dt>风险</dt><dd>几乎没有。唯一代价是这一周不出新功能</dd>
+        </dl>
+      </div>
+
+      <div class="plan b">
+        <div class="ph"><span class="lbl">B</span><h4>给「读数据」的任务开一条直接问的路</h4></div>
+        <div class="onel">能打电话问到的，就别派人跑腿——榜单、热搜、价格这类任务不再走界面，直接调接口拿结构化数据。</div>
+        <div class="scene"><b>生活场景：</b>以前查五家店的报价，要一家家派人跑过去问，来回半小时还可能扑空。现在给这五家装了电话，打一圈两分钟问完；派人跑腿只留给「必须到现场才能办的事」（发消息、下单、点赞）。</div>
+        <dl>
+          <dt>具体做</dt><dd>建一层「取数通道」：任务进来先判断是读还是写、有没有已知接口。读且有接口 → HTTP 直取（1 秒出结果）；读但无接口 → 走现在的界面自动化；写 → 一律走界面自动化。<b>拦包只是这层里的最后一个选项，不是方案本身。</b></dd>
+          <dt>成本</dt><dd>约 1–2 周做骨架，此后每接一个数据源 1–2 小时</dd>
+          <dt>收益</dt><dd>读类任务从 30–50 秒降到 1 秒内，且<b>不受 App 改版影响</b>（界面一改，自动化脚本就废；接口改的频率低得多）</dd>
+          <dt>风险</dt><dd>接口会变、会被限流；需要为每个源写解析与失效告警。不能承诺「永久可用」，只能承诺「失效时自动退回界面」</dd>
+        </dl>
+      </div>
+
+      <div class="plan c">
+        <div class="ph"><span class="lbl">C</span><h4>把脑子装回手机，并让它在后台干活</h4></div>
+        <div class="onel">端侧小模型替掉局域网大模型，影子屏落地——手机自己有脑子，且干活不占你的屏幕。</div>
+        <div class="scene"><b>生活场景：</b>现在手机是个提线木偶，线牵在电脑上，人在外面线就断了。改成它自己长脑子，出门也能干活；干活的时候用的是另一块「看不见的屏」，你该刷视频刷视频。</div>
+        <dl>
+          <dt>具体做</dt><dd>① 影子屏 POC（常驻管家进程 + 桥支持 <code>-d N</code> + 任务生命周期开屏/关屏），四层机制已验，只差拼装 ② 端侧模型（3B–4B 量化，或 NCNN）承接「常规步兜底 + 简单规划」，大模型降级为可选增强</dd>
+          <dt>成本</dt><dd>POC 约 1 周；端侧模型 1–2 个月（含精度回归）</dd>
+          <dt>收益</dt><dd>产品形态级变化：不占屏 + 离网可用 + 无 PC 依赖</dd>
+          <dt>风险</dt><dd>端侧模型精度可能顶不住复杂任务 20–30% 的掉点，需要「常规步端侧、卡住升云端」的双档设计；双屏功耗待实测</dd>
+        </dl>
+      </div>
+
+    </div>
+
+    <table>
+      <thead><tr><th>方案</th><th style="width:96px">工期</th><th style="width:110px">解决哪几条问题</th><th style="width:88px">是否改架构</th><th>我的判断</th></tr></thead>
+      <tbody>
+        <tr><td class="k">A 修地基</td><td>约 1 周</td><td>P0 全部 + P1 失败归因</td><td>否</td><td><b>先做，立刻做。</b>不做 A，B 和 C 都在流沙上盖楼。</td></tr>
+        <tr><td class="k">B 直接问</td><td>1–2 周</td><td>读类任务慢、易被改版打废</td><td>是（加一层路由）</td><td><b>A 之后紧接着做。</b>性价比最高的一项，正好接你第 4 个问题。</td></tr>
+        <tr><td class="k">C 装回手机</td><td>1 周 + 1–2 月</td><td>P0 脑在 PC、P1 影子屏未兑现</td><td>是（形态变化）</td><td>影子屏 POC 可以提前穿插做（一周就能演示）；端侧模型建议等 A/B 稳住再启动。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout c-green">
+      <div class="t">推荐顺序</div>
+      <b>A（1 周）→ B（1–2 周）→ C 的影子屏 POC（1 周，可与 B 并行）→ C 的端侧模型（看 A/B 结果再定）。</b>
+      理由：A 是唯一能让「后续每一轮迭代不再白干」的动作；B 用最小成本把最常用的一类任务从 30 秒压到 1 秒；C 是产品形态，值得做但不该排在最前面背债。
+    </div>
+  </section>
+
+  <!-- ============ 4 拦流量 ============ -->
+  <section>
+    <div class="sec-head"><span class="sec-no">04</span><h2>「装个 Surge 拦流量拿 API」——能做，但不是你要的答案</h2></div>
+
+    <p class="lead">这个问题值得单独答，因为它的<b>方向是对的（绕开界面直接拿数据），但工具选错了</b>。先说四句结论，再展开。</p>
+
+    <div class="callout c-red">
+      <div class="t">四个必须纠正的前提</div>
+      <ol style="list-style:none;display:grid;gap:10px;font-size:14px">
+        <li><b>1. Surge 是 iOS 独占，安卓上没有。</b>安卓的对等物是 Reqable（有安卓端）、mitmproxy、Charles，能力上够用，装得上。</li>
+        <li><b>2. 你举的例子根本不用拦包。</b>微博热搜的官方网页接口 <code>https://weibo.com/ajax/side/hotSearch</code> 不用登录、直接返回 JSON。带一个正常的 UA 就行。一次 GET，零风险。</li>
+        <li><b>3. 拦包不是「装个 App」那么简单，它要改运行环境。</b>安卓 7 以后用户装的证书 App 默认不认，得把证书塞进系统级（要 root / Magisk 模块）；抖音微博这类还做了证书固定，得再上 LSPosed 摘掉校验。这已经不是「装个软件」，是「改造这台手机」。</li>
+        <li><b>4. 「在安卓环境很安全」这个前提要反过来看。</b>全局 MITM 等于在自己主力机上常驻一个中间人：CA 私钥在手机里、明文流量落盘、所有 App 的流量都过它。这不是安全，这是把攻击面请进门。而且抖音这类会读 <code>TRANSPORT_VPN</code> 直接拒网，账号还可能被标「环境异常」——豆包被判异常就是这个逻辑。</li>
+      </ol>
+    </div>
+
+    <h3>拦包真正的三道坎（按难度递增）</h3>
+    <div class="steps">
+      <div class="step"><div class="sn">第一道 · 证书</div><div class="sb"><b>Android 7+ 默认不信任用户证书。</b>要抓 HTTPS 就得把 CA 提到系统级。老办法是 <code>/system/etc/security/cacerts/</code> 塞文件，Android 14 起系统证书在 APEX 模块里，路径和行为都变了 —— 需要 root + Magisk 模块，且换系统版本要重做。你有 root（一加 9、YT-K606F 都行），这关能过。</div></div>
+      <div class="step"><div class="sn">第二道 · 证书固定</div><div class="sb"><b>App 内置了服务器证书指纹，不认系统证书池。</b>抖音、微博、各家银行都做。解法是 LSPosed + JustTrustMe/TrustMeAlready 在运行时把校验函数拦住。这属于「运行时 Hook」——风控侧完全可见，且每次 App 更新都可能失效。这关能过，但要持续维护。</div></div>
+      <div class="step"><div class="sn">第三道 · 请求签名</div><div class="sb"><b>抓到请求 ≠ 能重放。</b>抖音的 <code>a_bogus</code>/<code>X-Bogus</code>、微博的签名字段，都是为了「这个请求必须由这个客户端产生」而设计的。要复用接口就得逆向签名算法，而这类算法<b>几个月一换</b>。这一关不是「难」，是「没有终点」——你维护的是一个会自己跑掉的靶子。</div></div>
+    </div>
+
+    <h3>那什么情况下才值得？一张判定表</h3>
+    <table>
+      <thead><tr><th style="width:250px">场景</th><th style="width:96px">拦包值得吗</th><th>为什么 / 该怎么做</th></tr></thead>
+      <tbody>
+        <tr><td class="k">有公开网页接口<br><span style="font-weight:400;color:#8B93A1">微博热搜、知乎热榜、B站 web 榜单</span></td><td><span class="tag no">不值得</span></td><td>直接 HTTP GET，带正常 UA/Referer 即可。<b>零成本、零风险、1 秒出结果</b>，还不受 App 改版影响。</td></tr>
+        <tr><td class="k">只在 App 内、但 a11y 能读<br><span style="font-weight:400;color:#8B93A1">多数电商、资讯、工具类</span></td><td><span class="tag no">不值得</span></td><td>现有界面自动化已经 4–7 步、30–60 秒跑通。为省 30 秒去改一台手机的系统信任链，不划算。</td></tr>
+        <tr><td class="k">只在 App 内、a11y 读不到、必须登录<br><span style="font-weight:400;color:#8B93A1">抖音私信、微信朋友圈、部分小程序</span></td><td><span class="tag mid">只有这类才考虑</span></td><td>这是拦包唯一真正不可替代的场景。建议：<b>副机 + 小号</b>，主力号不要上。先用视觉兜底（截图+多模态）试一轮，兜不住再上拦包。</td></tr>
+        <tr><td class="k">写操作<br><span style="font-weight:400;color:#8B93A1">发布、点赞、评论、下单</span></td><td><span class="tag no">绝对不要</span></td><td>签名 + 设备指纹 + 行为风控三重校验，重放请求等于自己把自己标成机器人。写操作只走界面自动化（有延迟、有随机化，反而更像人）。</td></tr>
+      </tbody>
+    </table>
+
+    <h3>所以正确的做法是分层，而不是一步到位上拦包</h3>
+
+    <figure>
+      <svg viewBox="0 0 1000 330" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,Microsoft YaHei,sans-serif">
+        <text x="0" y="14" font-size="11.5" font-weight="700" fill="#111827">取数通道 · 从上往下试，命中即停（越靠上越便宜、越稳）</text>
+
+        <!-- L1 -->
+        <rect x="0" y="30" width="700" height="48" rx="8" fill="#ECFDF3" stroke="#A9E5C2"/>
+        <text x="16" y="50" font-size="12" font-weight="700" fill="#054F31">① 公开网页接口（不用登录）</text>
+        <text x="16" y="68" font-size="10.5" fill="#067647">weibo.com/ajax/side/hotSearch · 各站 web 版 XHR · 官方开放平台</text>
+        <rect x="716" y="30" width="284" height="48" rx="8" fill="#FFFFFF" stroke="#E4E7EC"/>
+        <text x="730" y="50" font-size="10.5" fill="#4B5563">成本 极低｜稳定性 高｜风险 无</text>
+        <text x="730" y="67" font-size="10.5" fill="#067647" font-weight="600">覆盖你 80% 的「读」需求</text>
+
+        <!-- L2 -->
+        <rect x="0" y="88" width="700" height="48" rx="8" fill="#F0FDF4" stroke="#D1FADF"/>
+        <text x="16" y="108" font-size="12" font-weight="700" fill="#054F31">② 接口 + 自己的登录态（导出一次 cookie）</text>
+        <text x="16" y="126" font-size="10.5" fill="#067647">需要登录才能看的数据；cookie 有有效期，需刷新机制</text>
+        <rect x="716" y="88" width="284" height="48" rx="8" fill="#FFFFFF" stroke="#E4E7EC"/>
+        <text x="730" y="108" font-size="10.5" fill="#4B5563">成本 低｜稳定性 中｜风险 低（自己账号）</text>
+        <text x="730" y="125" font-size="10.5" fill="#6B7280">覆盖「读 + 需登录」</text>
+
+        <!-- L3 -->
+        <rect x="0" y="146" width="700" height="48" rx="8" fill="#FFF7ED" stroke="#FED7AA"/>
+        <text x="16" y="166" font-size="12" font-weight="700" fill="#7C2D12">③ 无障碍读屏（现有能力）</text>
+        <text x="16" y="184" font-size="10.5" fill="#9A3412">已在跑：微博热搜 5 步 31s · B站排行榜 4 步 44s · 连续 5 次零浪费</text>
+        <rect x="716" y="146" width="284" height="48" rx="8" fill="#FFFFFF" stroke="#E4E7EC"/>
+        <text x="730" y="166" font-size="10.5" fill="#4B5563">成本 已付｜稳定性 中（怕改版）｜风险 低</text>
+        <text x="730" y="183" font-size="10.5" fill="#6B7280">兜底 + 所有「写」操作</text>
+
+        <!-- L4 -->
+        <rect x="0" y="204" width="700" height="48" rx="8" fill="#FEF3F2" stroke="#FECACA"/>
+        <text x="16" y="224" font-size="12" font-weight="700" fill="#7F1D1D">④ 视觉兜底（截图 + 多模态）</text>
+        <text x="16" y="242" font-size="10.5" fill="#991B1B">a11y 被整树屏蔽时用（微信 8.0.52+、抖音）；慢，且要模型侧支持图像输入</text>
+        <rect x="716" y="204" width="284" height="48" rx="8" fill="#FFFFFF" stroke="#E4E7EC"/>
+        <text x="730" y="224" font-size="10.5" fill="#4B5563">成本 中｜稳定性 中｜风险 低</text>
+        <text x="730" y="241" font-size="10.5" fill="#6B7280">兜住「树里没有」</text>
+
+        <!-- L5 -->
+        <rect x="0" y="262" width="700" height="52" rx="8" fill="#F7F8FA" stroke="#8B93A1" stroke-dasharray="5 4"/>
+        <text x="16" y="282" font-size="12" font-weight="700" fill="#6B7280">⑤ 拦包 / MITM 抓私有 API</text>
+        <text x="16" y="300" font-size="10.5" fill="#8B93A1">需 root + 系统证书 + 绕过证书固定；遇签名算法则无终点</text>
+        <rect x="716" y="262" width="284" height="52" rx="8" fill="#FFFFFF" stroke="#E4E7EC"/>
+        <text x="730" y="282" font-size="10.5" fill="#4B5563">成本 高｜稳定性 低｜风险 高（改环境）</text>
+        <text x="730" y="299" font-size="10.5" fill="#B42318" font-weight="600">只在①–④全部兜不住时用</text>
+      </svg>
+      <figcaption>图 2 · 取数通道优先级。这张图就是方案 B 的核心：把「拦包」从第一选择挪到最后一选择。你的微博热搜例子落在第 ① 层。</figcaption>
+    </figure>
+
+    <h3>零风险拿 API 的实际操作（不用装任何东西）</h3>
+    <ul class="tight">
+      <li><b>在 PC 上开 Chrome</b>，打开目标站点的网页版（微博、B站、知乎都有）。</li>
+      <li>按 <code>F12</code> → Network → 筛 <code>Fetch/XHR</code> → 刷新页面。</li>
+      <li>在请求列表里找返回 JSON 的那个（响应里有你要的榜单/热搜文字），复制它的 URL 和请求头。</li>
+      <li>写成一个 30 行的 Python 请求脚本，带 UA + Referer，接到 Agent 的「取数通道」上。</li>
+      <li>整个过程<b>不碰手机、不要 root、不装证书、不改任何系统设置</b>。失效了改 URL 就行。</li>
+    </ul>
+
+    <div class="callout c-blue">
+      <div class="t">回到你最初的问题</div>
+      「能不能装一个类似 Surge 的流量拦截，获取 API，又在安卓环境很安全」——<b>能装，但「安全」这个词不成立，而且大部分场景不需要它。</b>
+      更划算的做法是：<b>把「能不能直接问接口」做成一套固定的判断流程（图 2）</b>，拦包只留作极少数读不到的数据的最后一招，并且只在副机上用。
+    </div>
+  </section>
+
+  <!-- ============ 5 已做 + 待拍板 ============ -->
+  <section>
+    <div class="sec-head"><span class="sec-no">05</span><h2>这轮已经做掉的，和要你拍板的</h2></div>
+
+    <h3>已经做掉：版本上传这件事，从「没有」变成「一键」</h3>
+    <p>你提的第一条「每个小版本要上传 GitHub」，此前的实际状况比想象中糟：<b>仓库里一个 tag 都没有，13 份文档全部没入库，真正跑在手机上的 <code>tabletbrain/</code> 大半没跟踪。</b>本轮已收口：</p>
+    <table>
+      <thead><tr><th style="width:130px">动作</th><th>结果</th></tr></thead>
+      <tbody>
+        <tr><td class="k">补忽略规则</td><td>拦住 130MB 的 <code>full_dex.txt</code>（超 GitHub 单文件上限，会直接推失败）、<code>portal.apk</code>/<code>termux.apk</code> 共 86MB 二进制、132MB <code>pi-build/node_modules</code>、以及含 portal token 的 <code>secrets_tablet.json</code> / <code>bridge/secrets.json</code></td></tr>
+        <tr><td class="k">分组提交 4 次</td><td>仓库卫生 → 13 份文档 → 入口 APK 1.9 → 端侧真源全量。全程做了密钥扫描，无 token/序列号入库</td></tr>
+        <tr><td class="k">打 tag 并推送</td><td><code>v1.9.0</code> 已推上 GitHub，与 <code>AndroidManifest</code> 的 versionName 对齐</td></tr>
+        <tr><td class="k">留下发布脚本</td><td><code>./release.sh "这次改了什么"</code>：自动读版本号 → 硬拦敏感文件 → 提交 → 打 tag → 自动挑可用代理推送。以后每个小版本一条命令</td></tr>
+        <tr><td class="k">补版本记录</td><td><code>CHANGELOG.md</code> 补齐 v0.7 → v1.9 的脉络</td></tr>
+      </tbody>
+    </table>
+
+    <h3>要你拍板的三件事</h3>
+    <div class="steps">
+      <div class="step"><div class="sn">决策 1</div><div class="sb"><b>先做方案 A（1 周，只修地基不出新功能），还是先做 B？</b><br>我的建议：<b>A 先做</b>。理由很硬——两份代码同时在改，B 加进来的取数层也会立刻变成第三份需要同步的东西，地基不修就是加速分叉。</div></div>
+      <div class="step"><div class="sn">决策 2</div><div class="sb"><b>取数通道要接哪些数据源？</b>建议第一批只接 3 个、且都是「当前跑得最多 + 有公开接口」的：微博热搜、B站排行榜、应用宝/酷安排行。<br>先把这 3 个跑到 1 秒，验证这套路由真的能省时间，再往上加。不要一上来铺 10 个源。</div></div>
+      <div class="step"><div class="sn">决策 3</div><div class="sb"><b>拦包这条线，现在要不要开？</b>我的建议：<b>现在不开。</b>先用「视觉兜底 + 公开接口」把能被读到的数据吃干净；只有当某个必须做的任务（比如抖音私信）确实读不到时，再单独起一个副机实验。主力机不上全局 MITM。</div></div>
+    </div>
+  </section>
+
+  <footer>
+    依据：<code>tabletbrain/mini_agent.py</code>（4359 行）、<code>架构整改方案-模型主脑与脚本快车道.md</code>、<code>第三方App任务实测与框架迭代-2026-10-22.md</code>、<code>豆包手机思路调研与改造方案.md</code>、<code>本机自动化可靠性加强方案.md</code>、git 历史与工作区实际状态（2026-10-28 00:33 采集）。<br>
+    接口与工具现状经外部查证：微博热搜接口 <code>weibo.com/ajax/side/hotSearch</code> 目前无需登录可用（需正常 UA/Referer）；安卓侧 MITM 工具 Reqable 走 VPNService，证书固定需 LSPosed 模块配合。<br>
+    本文所有数字均可回溯到代码行或实测报告，未做估算填充。
+  </footer>
+
+</div>
+</body>
+</html>
