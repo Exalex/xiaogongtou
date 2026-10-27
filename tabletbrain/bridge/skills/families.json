@@ -1,0 +1,32 @@
+{
+ "read": {
+  "name": "读数",
+  "budget": 15,
+  "skeleton": ["open_app", "goto", "read"],
+  "desc": "打开应用 → 到达目标页 → 读取指定元素"
+ },
+ "list": {
+  "name": "列表",
+  "budget": 30,
+  "skeleton": ["open_app", "goto", "collect", "answer"],
+  "desc": "打开应用 → 到达目标页 → 滚动收集 → 输出前N"
+ },
+ "search": {
+  "name": "搜索",
+  "budget": 25,
+  "skeleton": ["open_app", "tap_search", "input", "submit", "read"],
+  "desc": "打开应用 → 点搜索框 → 输入关键词 → 提交 → 读结果"
+ },
+ "send": {
+  "name": "发送",
+  "budget": 40,
+  "skeleton": ["open_app", "locate", "verify_identity", "input", "send", "verify_delivery"],
+  "desc": "打开应用 → 定位对象 → 校验身份 → 输入 → 发送 → 校验送达"
+ },
+ "publish": {
+  "name": "发布",
+  "budget": 40,
+  "skeleton": ["open_app", "pick_media", "edit", "caption", "stop_before_send"],
+  "desc": "打开应用 → 选素材 → 编辑 → 填文案 → 停在发送前"
+ }
+}

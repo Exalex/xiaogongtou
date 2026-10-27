@@ -1,0 +1,238 @@
+{
+ "com.coloros.alarmclock": {
+  "version": 3,
+  "home_path": {
+   "back": 1,
+   "until": [
+    "闹钟",
+    "世界时钟"
+   ],
+   "max_back": 2,
+   "tap_home_tab": [
+    162,
+    2268
+   ]
+  },
+  "pages": [
+   {
+    "name": "闹钟页",
+    "verify": [
+     "闹钟",
+     "世界时钟"
+    ]
+   }
+  ]
+ },
+ "com.coloros.calendar": "{'version': 3, 'home_path': {'back': 2, 'until': ['今天', '农历'], 'max_back': 3}, 'pages': [{'name': '月视图', 'verify': ['今天', '农历']}]} 日历App主界面直接展示日程，无需额外入口",
+ "com.coloros.weather2": {
+  "version": 3,
+  "home_path": {
+   "back": 1,
+   "until": [
+    "℃"
+   ],
+   "max_back": 2
+  },
+  "pages": [
+   {
+    "name": "天气首页",
+    "verify": [
+     "℃",
+     "城市管理"
+    ]
+   }
+  ]
+ },
+ "com.microsoft.emmx": "在Edge浏览器中，点击底部地址栏输入网址或搜索关键词。",
+ "com.tencent.news": "首页信息流支持上下滑动浏览，弹窗需点击同意或先不了 首页默认展示头条新闻列表，直接浏览即可 腾讯新闻App首页默认展示头条新闻列表 首页信息流位于顶部，点击新闻卡片即可进入详情页",
+ "com.ss.android.article.news": {
+  "version": 3,
+  "home_path": {
+   "back": 2,
+   "until": [
+    "财经",
+    "军事",
+    "国际"
+   ],
+   "max_back": 4
+  },
+  "pages": [
+   {
+    "name": "首页信息流",
+    "verify": [
+     "财经",
+     "军事",
+     "国际"
+    ]
+   }
+  ],
+  "spots": [
+   {
+    "label": "财经频道",
+    "x": 445,
+    "y": 313,
+    "whens": [
+     "财经",
+     "军事",
+     "国际"
+    ],
+    "page": "首页信息流"
+   }
+  ]
+ },
+ "com.xiaogongtou.entry": "App启动后需等待页面加载完成再进行操作",
+ "com.heytap.music": "底部导航栏包含首页、发现、我的等核心入口",
+ "com.coloros.phonemanager": "手机管家首页顶部区域直接显示当前电量百分比",
+ "com.sina.weibo": {
+  "version": 3,
+  "home_path": {
+   "back": 3,
+   "until": [
+    "发现",
+    "微博热搜"
+   ],
+   "max_back": 5,
+   "tap_home_tab": [
+    540,
+    2277
+   ]
+  },
+  "pages": [
+   {
+    "name": "发现页",
+    "verify": [
+     "微博热搜",
+     "关注"
+    ]
+   },
+   {
+    "name": "热搜雷达页",
+    "verify": [
+     "热搜雷达"
+    ]
+   },
+   {
+    "name": "热搜榜",
+    "verify": [
+     "实时热点"
+    ]
+   },
+   {
+    "name": "搜索页",
+    "verify": [
+     "搜索微博",
+     "取消"
+    ],
+    "dead_end": true
+   }
+  ],
+  "spots": [
+   {
+    "label": "更多热搜",
+    "x": 907,
+    "y": 846,
+    "whens": [
+     "微博热搜"
+    ],
+    "page": "发现页"
+   },
+   {
+    "label": "热搜",
+    "x": 267,
+    "y": 624,
+    "whens": [
+     "热搜雷达"
+    ],
+    "page": "热搜雷达页"
+   }
+  ]
+ },
+ "com.aiyu.kaipanla": {
+  "version": 3,
+  "home_path": {
+   "back": 2,
+   "until": [
+    "实时龙虎榜",
+    "题材库"
+   ],
+   "max_back": 4
+  },
+  "pages": [
+   {
+    "name": "首页",
+    "verify": [
+     "实时龙虎榜",
+     "题材库",
+     "复盘啦",
+     "市场情绪"
+    ]
+   },
+   {
+    "name": "市场情绪页",
+    "verify": [
+     "涨跌统计",
+     "实际涨停"
+    ]
+   },
+   {
+    "name": "龙虎榜页",
+    "verify": [
+     "上榜",
+     "龙虎榜"
+    ]
+   }
+  ],
+  "spots": [
+   {
+    "label": "市场情绪",
+    "x": 405,
+    "y": 342,
+    "whens": [
+     "实时龙虎榜",
+     "题材库"
+    ],
+    "page": "首页"
+   },
+   {
+    "label": "龙虎榜",
+    "x": 740,
+    "y": 2281,
+    "whens": [
+     "自选股",
+     "龙虎榜",
+     "行情"
+    ],
+    "page": "首页"
+   }
+  ]
+ },
+ "com.android.settings": {
+  "version": 3,
+  "pages": [
+   {
+    "name": "设置首页",
+    "verify": [
+     "WLAN",
+     "连接与共享",
+     "显示与亮度"
+    ]
+   },
+   {
+    "name": "电池页",
+    "verify": [
+     "耗电",
+     "电池用量"
+    ]
+   }
+  ],
+  "home_path": {
+   "back": 2,
+   "until": [
+    "WLAN",
+    "连接与共享"
+   ],
+   "max_back": 4
+  }
+ },
+ "tv.danmaku.bili": "底部导航栏中间为热门入口，点击可浏览热门榜单"
+}

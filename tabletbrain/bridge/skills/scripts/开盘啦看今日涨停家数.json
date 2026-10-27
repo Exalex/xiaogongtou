@@ -1,0 +1,26 @@
+{
+ "id": "开盘啦看今日涨停家数",
+ "name": "开盘啦看今日涨停家数",
+ "family": "read",
+ "match": [],
+ "app": "com.aiyu.kaipanla",
+ "steps": [
+  {
+   "do": "open_app",
+   "package": "com.aiyu.kaipanla"
+  },
+  {
+   "do": "tap",
+   "xy": [
+    405,
+    342
+   ]
+  }
+ ],
+ "status": "candidate",
+ "runs": 0,
+ "ok": 0,
+ "created": 1791733244,
+ "last_run": 0,
+ "source_task": "开盘啦看今日涨停家数"
+}

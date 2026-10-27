@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.parse
 
 PORTAL_BASE = os.environ.get("PORTAL_BASE", "http://127.0.0.1:8080")
 LLM_BASE = os.environ.get("LLM_BASE", "http://192.168.3.75:8888/v1")
@@ -204,11 +205,22 @@ class Portal:
     def open_app(self, package):
         try:
             self._unwrap(self._req("/app", "POST", {"package": package}))
+            return
         except Exception as e:
-            r = bridge_cmd("open %s" % package)
-            if not r.startswith("ok"):
-                raise RuntimeError("open_app 双通道失败: %r / %s" % (e, r))
-            print("[portal] open_app 经 root 桥完成: %s" % package)
+            err1 = e
+            print("[portal] open_app 经 portal 失败: %r" % (err1,))
+        # 免 root 机型：portal 因包可见性拿不到 launch intent，改由本机入口 App 代发 startActivity
+        try:
+            r = launch_via_entry(package)
+            if r:
+                print("[entry] open_app 经入口 App(8901) 完成: %s" % package)
+                return
+        except Exception as e:
+            print("[entry] open_app 经入口 App 失败: %r" % (e,))
+        r = bridge_cmd("open %s" % package)
+        if not r.startswith("ok"):
+            raise RuntimeError("open_app 三通道失败: portal=%r / bridge=%s" % (err1, r))
+        print("[portal] open_app 经 root 桥完成: %s" % package)
 
     def get_apps(self):
         """已安装应用列表 [{packageName, label, ...}]"""
@@ -1238,6 +1250,33 @@ _BRIDGE_TO = [0]      # 桥连续超时计数（平板无 root：≥2 次 → �
 _BRIDGE_DEAD = [False]
 
 
+def launch_via_entry(package, timeout=8.0):
+    """免 root 冷启动：委托入口 App（小工头）的 LaunchApi 代发 startActivity。
+    返回 True=已发出；False=未装/未就绪；异常=调用失败。
+    背景：非 root 机上 `am start` 报 shell 包名不匹配、`monkey` 无窗口权限、
+    portal /app 因包可见性拿不到 launch intent —— 只有入口 App 能合法拉起别人。"""
+    url = "http://127.0.0.1:8901/launch?pkg=" + urllib.parse.quote(package, safe="")
+    try:
+        r = urllib.request.urlopen(url, timeout=timeout)
+        d = json.loads(r.read().decode("utf-8") or "{}")
+    except Exception as e:
+        if "refused" in repr(e).lower():
+            return False           # 8901 没起（老版本入口 App / 服务未连）
+        raise
+    if d.get("ok"):
+        return True
+    raise RuntimeError(str(d.get("error") or "entry launch failed"))
+
+
+def apps_via_entry(timeout=8.0):
+    """从入口 App(8901) 取已安装应用清单（非 root 机型 portal /packages 看不到别人时的兜底）。"""
+    r = urllib.request.urlopen("http://127.0.0.1:8901/apps", timeout=timeout)
+    d = json.loads(r.read().decode("utf-8") or "{}")
+    if not d.get("ok"):
+        raise RuntimeError(str(d.get("error") or "entry apps failed"))
+    return d.get("apps") or []
+
+
 def bridge_cmd(cmd, timeout=8.0):
     """经 root 桥（xgt-bridge.sh）执行命令：返回 "ok" 或 "err:..."。
     协议：写 ~/bridge/.xgt_req（"<seq> <cmd>"）→ 桥执行 → 读 ~/bridge/.xgt_res。"""
@@ -1379,6 +1418,7 @@ def wx_send_skill(to, text, tracer=None, timeout=150):
 # 对策：截图（无 FLAG_SECURE，可用）→ 多模态模型给"文字+坐标" → 伪元素清单，下游零改动。
 VISION_ON = os.environ.get("VISION_FALLBACK", "1") == "1"
 _LAST_PKG = [""]   # 最近一次已知前台包名（portal 读不到时用于判断"是不是被屏蔽的 App"）
+_VIS_ST = [0, None, 0]   # 视觉救援状态：[已用次数, 上一步元素签名, 签名连续相同次数]
 VISION_Q = ("这是安卓手机截图，分辨率 {w}x{h}（宽x高）。列出屏幕上所有可点击元素的中心坐标。"
             "只输出 JSON 数组，不要解释、不要代码块。"
             '每项形如 {{"label":"元素上的文字","x":X,"y":Y}}（X/Y 用 0-1000 归一化值）。最多 25 项。')
@@ -2827,6 +2867,16 @@ def main():
         print("[agent] 应用列表: %d 个已安装应用" % len(apps))
     except Exception as e:
         print("[agent] 应用列表加载失败（跳过包名矫正）: %r" % (e,))
+    if len(apps) <= 1:
+        # 免 root 机型（ZUI/Android16）上 portal 的包可见性为 0，只能返回它自己；
+        # 改由入口 App 的 8901 /apps 取同一份清单，否则模型会误判"本机未安装"而改走浏览器。
+        try:
+            _extra = apps_via_entry()
+            if len(_extra) > len(apps):
+                print("[agent] 应用列表改由入口 App 提供: %d 个" % len(_extra))
+                apps = _extra
+        except Exception as e:
+            print("[agent] 入口 App 应用列表不可用: %r" % (e,))
     related_apps = match_apps_for_task(task, apps)
     # —— 开工前规划：qwen 先理解任务（纠同音字）+ 从清单选目标 App + 列计划（2026-09-24 新增） ——
     plan = None
@@ -3194,6 +3244,33 @@ def main():
                 print("[step %d] 重读后仍只有 %d 个元素（可能仍在加载）" % (step, len(elems)))
         except Exception as _e_low:
             print("[step %d] 低元素重读异常（跳过）: %r" % (step, _e_low))
+        # —— 元素太少 / 屏幕没变 → 视觉救援（2026-10-28 Y700 实测驱动）——
+        #    微博游客态：a11y 只报 4~6 个元素（底部导航都没报全），模型只能反复猜同一坐标；
+        #    原逻辑**只在"完全读不到"时才截图**，所以这条路从未被用上。
+        #    现在两种情形都补一次"截图看一眼"：① 元素 <5 ② 元素标签集合与上一步完全一致
+        #    （= 点了没反应）。**每任务最多 2 次**，避免每步 +9s 把任务拖死。
+        try:
+            _sig = (cur_pkg, tuple(str(e[3]) for e in elems))
+            if _sig == _VIS_ST[1]:
+                _VIS_ST[2] += 1
+            else:
+                _VIS_ST[1] = _sig
+                _VIS_ST[2] = 0
+            _need_vis = (len(elems) < 5) or (_VIS_ST[2] >= 1)
+            if VISION_ON and _need_vis and _VIS_ST[0] < 2:
+                _why = "元素少(%d)" % len(elems) if len(elems) < 5 else "屏幕未变化"
+                _ve = vision_elements(step, tracer)
+                if _ve:
+                    _VIS_ST[0] += 1
+                    _base = max([int(e[0]) for e in elems]) + 1 if elems else 0
+                    _ve2 = [(int(_base + i), int(x), int(y), str(lb), True)
+                            for i, (_i, x, y, lb, _c) in enumerate(_ve)]
+                    print("[step %d] 视觉救援（%s）→ 补充 %d 个可点元素（编号 %d~%d），本任务第 %d 次"
+                          % (step, _why, len(_ve2), _base, _base + len(_ve2) - 1, _VIS_ST[0]))
+                    tracer.log(step, "result", "%s→视觉补充 %d" % (_why, len(_ve2)))
+                    elems = elems + _ve2
+        except Exception as _e_vis:
+            print("[step %d] 视觉救援异常（跳过）: %r" % (step, _e_vis))
         # —— 已知锚点注入（2026-10-22）：a11y 读不到的自绘入口（如 B站HD 搜索栏）
         #    以虚拟元素形式并入清单，模型可直接 pick，不用猜坐标。
         try:

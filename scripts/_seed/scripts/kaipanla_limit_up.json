@@ -1,0 +1,54 @@
+{
+ "id": "kaipanla_limit_up",
+ "name": "开盘啦今日涨停家数",
+ "family": "read",
+ "match": [
+  "开盘啦",
+  "涨停"
+ ],
+ "app": "com.aiyu.kaipanla",
+ "home_path": {
+  "back": 2,
+  "until": [
+   "实时龙虎榜",
+   "题材库"
+  ],
+  "max_back": 4
+ },
+ "steps": [
+  {
+   "do": "open_app",
+   "verify": {
+    "text": [
+     "实时龙虎榜"
+    ]
+   }
+  },
+  {
+   "do": "tap",
+   "spot": "市场情绪",
+   "verify": {
+    "text": [
+     "实际涨停"
+    ]
+   }
+  },
+  {
+   "do": "extract_text",
+   "text": "实际涨停",
+   "done": true
+  }
+ ],
+ "status": "candidate",
+ "runs": 0,
+ "ok": 0,
+ "device": "LE2110/1080x2400",
+ "created": 1760000000,
+ "last_run": 0,
+ "note": "手工种子（来源：开发笔记轮 24 实测路径 市场情绪(405,342)）",
+ "not_match": [
+  "跌停",
+  "跌停家数",
+  "跌幅"
+ ]
+}

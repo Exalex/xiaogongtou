@@ -1,0 +1,62 @@
+{
+ "id": "weibo_hot_rank_top5",
+ "name": "微博热搜前五",
+ "family": "list",
+ "match": [
+  "微博",
+  "热搜"
+ ],
+ "app": "com.sina.weibo",
+ "home_path": {
+  "back": 3,
+  "until": [
+   "发现",
+   "微博热搜"
+  ],
+  "max_back": 5,
+  "tap_home_tab": [
+   540,
+   2277
+  ]
+ },
+ "steps": [
+  {
+   "do": "open_app",
+   "verify": {
+    "text": [
+     "发现"
+    ]
+   }
+  },
+  {
+   "do": "tap",
+   "spot": "更多热搜",
+   "verify": {
+    "text": [
+     "热搜雷达"
+    ]
+   }
+  },
+  {
+   "do": "tap",
+   "spot": "热搜",
+   "verify": {
+    "text": [
+     "实时热点"
+    ]
+   }
+  },
+  {
+   "do": "extract_rank",
+   "n": 5,
+   "done": true
+  }
+ ],
+ "status": "candidate",
+ "runs": 0,
+ "ok": 0,
+ "device": "LE2110/1080x2400",
+ "created": 1760000000,
+ "last_run": 0,
+ "note": "待重新标定：2026-10-11 实测发现微博改版——发现页入口不再是「更多热搜」(907,846)，搜索框默认词「热搜简报」(964,297) 会进搜索页。需按当前 UI 重新标定 steps 与卡片 spots。"
+}

@@ -1,0 +1,47 @@
+{
+ "id": "calendar_today",
+ "name": "日历今天日程",
+ "family": "read",
+ "match": [
+  "日历",
+  "日程",
+  "安排"
+ ],
+ "app": "com.coloros.calendar",
+ "home_path": {
+  "back": 2,
+  "until": [
+   "今天",
+   "农历"
+  ],
+  "max_back": 3
+ },
+ "steps": [
+  {
+   "do": "open_app",
+   "verify": {
+    "text": [
+     "今天",
+     "农历"
+    ]
+   }
+  },
+  {
+   "do": "tap",
+   "text": "今天"
+  },
+  {
+   "do": "extract_text",
+   "text": "已选中",
+   "sanity": "today_date",
+   "done": true
+  }
+ ],
+ "status": "candidate",
+ "runs": 1,
+ "ok": 0,
+ "device": "LE2110/1080x2400",
+ "created": 1760000000,
+ "last_run": 1791733573,
+ "note": "手工种子（来源：2026-10-11 真机探测 月视图「已选中,10月11日,…没有日程」）"
+}

@@ -1,0 +1,193 @@
+{
+ "package": "com.aiyu.kaipanla",
+ "pages": [
+  {
+   "sig": "kaipanla|ArticleDetailActivit|23651f88",
+   "activity": "com.aiyu.kaipanla.discovery.ui.activity.ArticleDetailActivity",
+   "tag": "home",
+   "elems": 30,
+   "labels": [
+    "16:11",
+    "小象超市通知：",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "大众点评通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|UserInfoActivity|3dddcd0b",
+   "activity": "com.aiyu.kaipanla.newindex.user.activity.UserInfoActivity",
+   "tag": "返回",
+   "elems": 58,
+   "labels": [
+    "16:11",
+    "小象超市通知：",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "大众点评通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|ZXINGActivity|2b4afacd",
+   "activity": "com.aiyu.kaipanla.zxing.ZXINGActivity",
+   "tag": "字体大小",
+   "elems": 26,
+   "labels": [
+    "16:11",
+    "小象超市通知：",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "大众点评通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|MainActivity|261b144c",
+   "activity": "com.aiyu.kaipanla.newindex.ui.main.MainActivity",
+   "tag": "龙虎榜",
+   "elems": 65,
+   "labels": [
+    "16:11",
+    "小象超市通知：",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "大众点评通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|MainActivity|38ffefeb",
+   "activity": "com.aiyu.kaipanla.newindex.ui.main.MainActivity",
+   "tag": "首页",
+   "elems": 65,
+   "labels": [
+    "16:12",
+    "小象超市通知：",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "大众点评通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|SearchActivity|5eec465e",
+   "activity": "com.aiyu.kaipanla.newindex.search.ui.activity.SearchActivity",
+   "tag": "股票搜索",
+   "elems": 75,
+   "labels": [
+    "16:12",
+    "小象超市通知：",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "大众点评通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。"
+   ]
+  }
+ ],
+ "edges": [
+  {
+   "from": "kaipanla|ArticleDetailActivit|23651f88",
+   "label": "返回",
+   "to": "kaipanla|UserInfoActivity|3dddcd0b"
+  },
+  {
+   "from": "kaipanla|ArticleDetailActivit|23651f88",
+   "label": "字体大小",
+   "to": "kaipanla|ZXINGActivity|2b4afacd"
+  },
+  {
+   "from": "kaipanla|MainActivity|261b144c",
+   "label": "我的",
+   "to": "kaipanla|UserInfoActivity|3dddcd0b"
+  },
+  {
+   "from": "kaipanla|MainActivity|261b144c",
+   "label": "首页",
+   "to": "kaipanla|MainActivity|38ffefeb"
+  },
+  {
+   "from": "kaipanla|MainActivity|261b144c",
+   "label": "股票搜索",
+   "to": "kaipanla|SearchActivity|5eec465e"
+  },
+  {
+   "from": "kaipanla|MainActivity|261b144c",
+   "label": "6ab25d1ec5dc1",
+   "to": "kaipanla|ArticleDetailActivit|23651f88"
+  }
+ ]
+}

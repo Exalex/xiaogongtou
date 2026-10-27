@@ -1,0 +1,54 @@
+---
+name: phone-control
+description: 操作这台 Android 手机（一加9/ColorOS/root）的完整手册——读屏、点按、输入、开应用、截图、电量、微信发送、纪律与红线。当任务需要在手机上点按界面、打开应用、读屏幕内容、给某人发微信时，先读这份技能再动手。
+---
+
+# phone-control · 手机操作手册
+
+你在一台真实的 Android 手机上（root + Termux）。所有屏幕操作统一走 `ptool`：
+
+```
+python3 ~/bridge/tools/ptool.py <子命令>
+```
+
+## 常用命令
+| 目的 | 命令 |
+|---|---|
+| 看屏幕（前台应用 + 元素清单，含坐标） | `ptool.py state` |
+| 点一下 | `ptool.py tap <x> <y>` |
+| 滑动 | `ptool.py swipe <x1> <y1> <x2> <y2> [毫秒]` |
+| 输入文字（先点输入框再输入） | `ptool.py text "内容"` |
+| 返回/回桌面/回车 | `ptool.py key BACK` / `key HOME` / `key ENTER` |
+| 打开应用 | `ptool.py open 设置` 或 `ptool.py open com.android.settings` |
+| 截图 | `ptool.py shot`（落 `~/pi-work/out/`） |
+| 电量 | `ptool.py battery` |
+| 已装应用列表 | `ptool.py apps` |
+| 当前前台窗口 | `ptool.py front` |
+| 微信发送 | `ptool.py wx-send --to "名字" --text "内容"` |
+
+## 推荐工作方式（看-想-做）
+1. 先 `state` 拿到元素清单（坐标都在里面），不要凭猜点。
+2. 点按后**再 `state` 一次**确认页面变化；没变就换思路（滚动/返回/换入口）。
+3. 找不到元素时：`key BACK` 退回上一层，或 `key HOME` 回桌面重来。
+4. 需要视觉细节（图片、排版、被屏蔽界面）时用 `shot` 截图，再用你的 `read` 工具查看 PNG 文件。
+
+## 微信红线（最重要）
+- 微信的界面**读不到**（应用屏蔽了无障碍读取，`state` 会返回空树）——这是正常的，不是故障。
+- 发消息**只能**用：`ptool.py wx-send --to "联系人" --text "内容"`。
+  - 该脚本内置：状态机导航 + 身份确权（防认错人）+ 输入校验 + 送达回执 + 找不到则"干净停"。
+  - 返回码 0=成功；6=找不到联系人（干净停，未发任何消息）；其他非 0 都是安全中止。
+- **禁止**用 tap/swipe/text 直接操作微信界面（会把安全问题引进来）。
+
+## 纪律与红线
+1. 涉支付/密码/登录的界面 → 立即停手，报告"需要人工处理"（例如淘宝登录页是 FLAG_SECURE，截图会黑屏，也是信号）。
+2. 不要 `am force-stop com.xiaogongtou.entry`（会摘掉无障碍服务）。
+3. 不要动 `/data/adb/mobilerun-console/`、`~/bridge/secrets.json`、`~/mini_console.py` 的进程（它们是入口与守护，弄坏要人工修）。
+4. 手机上有人在用时：只读操作随意（state/shot/battery）；点击类操作前先说明你要干什么。
+5. 点击节奏：连续操作之间留 0.3~0.5 秒（拟人化 + 等页面响应）。
+6. 影子屏（正式模式）任务时，环境变量 `XGT_DISPLAY=N` 已由控制台注入，`ptool` 会自动把动作发到影子屏——你不需要改任何命令。
+
+## 常见坑（踩过的）
+- 主屏任务时坐标是物理像素（1080×2400）。
+- `state` 里 `[可点]` 标记表示该元素可点；坐标是元素中心。
+- 输入中文走系统的真输入法链路（已由 ptool 处理）；输入前必须先 tap 到输入框（否则文字会丢）。
+- 如果 `state` 报 `portal_unreachable`：等一下重试（守护会在几分钟内自愈），或先 `key HOME`。

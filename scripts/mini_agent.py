@@ -21,6 +21,7 @@ import base64
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -52,6 +53,44 @@ SKILLS_DIR = os.path.expanduser("~/bridge/skills")
 EXAMPLES_PATH = os.path.join(SKILLS_DIR, "examples.json")
 FAILURES_PATH = os.path.join(SKILLS_DIR, "failures.json")
 
+# ---------------------------------------------------------------- 确定性骨架（2026-10-11）
+# 三级锚点（包名/Activity → 像素指纹 → 文本特征）+ 五道关卡（开工闸门/起点/路径/步进/收工）
+# 每个机制一个独立开关：出问题可单项关闭，不必整体回滚。
+try:
+    import anchors as AN
+except Exception as _e:
+    AN = None
+    print("[agent] anchors 模块不可用（锚点降级为纯文本）: %r" % (_e,))
+try:
+    import scripts_lib as SL
+except Exception as _e:
+    SL = None
+    print("[agent] scripts_lib 模块不可用（确定性骨架关闭）: %r" % (_e,))
+
+SW_ANCHORS = os.environ.get("ANCHORS", "1") == "1"      # 三级锚点（Activity / 像素指纹）
+SW_GATE    = os.environ.get("GATE", "1") == "1"         # 关卡〇 开工闸门（可行性）
+SW_BUDGET  = os.environ.get("BUDGET", "1") == "1"       # 关卡〇 分级预算
+SW_FAMILY  = os.environ.get("FAMILIES", "1") == "1"     # 任务家族
+SW_HOME    = os.environ.get("HOME_RESET", "1") == "1"   # 关卡一 起点归位
+SW_SCRIPT  = os.environ.get("SCRIPT_REPLAY", "1") == "1"  # 关卡二 脚本重放
+SW_SKELETON = os.environ.get("SKELETON", "0") == "1"    # 关卡二' 规划骨架确定性执行
+#   ⚠️ 2026-10-12 默认**关**：用户定调"速度不是第一考量、准确率优先" —— 新任务**直接走
+#   模型逐步决策**（准确率最高），骨架只作为**规划建议**注入 prompt（render_plan），
+#   不再作为"廉价先行路径"。骨架执行仅留给实验（SKELETON=1）。
+SW_REVIEW  = os.environ.get("RESULT_REVIEW", "1") == "1"  # 关卡四 收工结果复核
+SW_SUBGOAL = os.environ.get("SUBGOALS", "1") == "1"     # 关卡三 子目标 + 每步验收
+SW_GUARDS  = os.environ.get("GUARDS", "1") == "1"       # 贯穿件 B 硬闸门
+
+SCRIPT_BREAK_HINT = [""]     # 脚本断裂提示（供自由循环注入 history）
+_JEV_FAILS = [0]             # jev 连续失败计数（≥2 → 本次运行不再尝试 jev）
+try:
+    TIME_CAP = float(os.environ.get("TIME_CAP", "150"))   # 单任务总时长上限（秒）
+except Exception:
+    TIME_CAP = 150.0
+_ACT_CACHE = {"ts": 0.0, "v": ""}
+_FP_CACHE = {"ts": 0.0, "v": None}
+_HOME_DONE = set()           # 本次运行内已归位过的 App（脚本重放与自由循环共用）
+
 try:
     sys.stdout.reconfigure(line_buffering=True)
 except Exception:
@@ -59,9 +98,11 @@ except Exception:
 
 SYSTEM_PROMPT = (
     "你是运行在安卓手机里的自动化助手。你会收到当前屏幕上的可访问性元素列表，"
-    "每行形如 `(x,y) 文本 (类型) 可点`，括号中的坐标是该元素中心点。\n"
+    "每行形如 `[编号] (x,y) 文本 可点`，编号是该元素的唯一编号。\n"
     "你只能输出一个 JSON 对象（不要输出 JSON 以外的任何文字），表示下一步动作：\n"
-    '- {"action":"tap","x":数字,"y":数字} 点击坐标\n'
+    '- {"action":"tap","pick":编号} 点击列表里的第 N 号元素（**强烈推荐、最准**；'
+    "直接报编号，不要抄坐标、不要猜名字）\n"
+    '- {"action":"tap","x":数字,"y":数字} 点击坐标（仅在列表里确实没有该元素时用）\n'
     '- {"action":"swipe","x1":,"y1":,"x2":,"y2":,"duration":500} 滑动\n'
     '- {"action":"input_text","text":"内容"} 在光标处输入文本\n'
     '- {"action":"key","key_code":4} 安卓键码（BACK=4, HOME=3, ENTER=66）\n'
@@ -209,9 +250,9 @@ def render_tree(state, limit=120):
     return "\n".join(lines)
 
 
-def call_llm(messages, timeout=90):
+def call_llm(messages, timeout=90, max_tokens=1024):
     payload = {"model": LLM_MODEL, "messages": messages,
-               "temperature": 0.2, "max_tokens": 1024}
+               "temperature": 0.2, "max_tokens": max_tokens}
     if not LLM_THINK:
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     req = urllib.request.Request(LLM_BASE.rstrip("/") + "/chat/completions",
@@ -248,8 +289,11 @@ def jev_ask(state, questions, timeout=30):
         return json.loads(resp.read())
 
 
-def collect_elements(state, limit=110):
-    """a11y 树 → [(idx, cx, cy, label, clickable)]"""
+def collect_elements(state, limit=110, drop_status_bar=True):
+    """a11y 树 → [(idx, cx, cy, label, clickable)]
+
+    2026-10-12：**过滤状态栏**（cy < 110 的时间/电量/通知图标文字）。实测一次 dump 里
+    30 个元素有 20 个是状态栏噪声 → 严重稀释模型注意力、并污染"文字锚点"验收。"""
     out = []
 
     def visit(node):
@@ -263,7 +307,8 @@ def collect_elements(state, limit=110):
         if label and isinstance(b, dict) and b:
             cx = (b.get("left", 0) + b.get("right", 0)) // 2
             cy = (b.get("top", 0) + b.get("bottom", 0)) // 2
-            out.append((len(out), cx, cy, label[:200], clickable))
+            if not (drop_status_bar and cy < 110 and not clickable):
+                out.append((len(out), cx, cy, label[:200], clickable))
         for c in node.get("children") or []:
             visit(c)
 
@@ -272,11 +317,13 @@ def collect_elements(state, limit=110):
 
 
 def render_elems(elems):
-    """补充后的元素清单（portal + 桥树）→ LLM 友好文本（qwen 与 jev 共用同一"事实来源"，
-    修复：此前 qwen 只吃 portal 原始树，桥树补盲对它不可见）。"""
+    """补充后的元素清单（portal + 桥树）→ LLM 友好文本（qwen 与 jev 共用同一"事实来源"）。
+
+    2026-10-12：**每行带编号 [N]**，让模型只报编号（`pick`）而不是抄坐标/猜名字 ——
+    这是"一次成功率"最关键的一处：抄错坐标、名字对不上这两类失败从根上消失。"""
     lines = []
     for idx, x, y, label, clickable in elems:
-        lines.append("(%d,%d) %s%s" % (x, y, label, " 可点" if clickable else ""))
+        lines.append("[%d] (%d,%d) %s%s" % (idx, x, y, label, " 可点" if clickable else ""))
     return "\n".join(lines)
 
 
@@ -347,7 +394,8 @@ def uiauto_elements(timeout=8.0):
         return []
 
 
-def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg="", plan=None):
+def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg="",
+                plan=None, goal_text=""):
     # 保护：Jev 的 Choice criteria 选项上限 255（含动作项）——元素过多时截断
     if len(elems) > 180:
         elems = elems[:180]
@@ -389,6 +437,9 @@ def jev_decide(task, elems, history, experience=None, related_apps=None, cur_pkg
         target_instr += ("\n" + plan_text +
                          "\n请按此计划推进：若尚未在目标应用内，优先选择「打开应用」；"
                          "达到完成标准时用 done 收尾。")
+    if goal_text:
+        target_instr += ("\n" + goal_text +
+                         "\n只专注完成「当前子目标」，不要跳步；当前子目标达成后再考虑下一个。")
     questions = {
         "target": {"type": "choice",
             "instructions": target_instr,
@@ -593,11 +644,35 @@ def qwen_plan(task, apps):
         "任务原文：%s\n\n本机已安装应用（名称(包名)）：\n%s\n\n"
         "注意：若任务点名的应用/来源本机没有安装，app_label 与 app_package 填 null，"
         "并在 fallback 里给出替代方案（优先：用「浏览器」打开其官网或搜索该来源）。\n"
+        "任务类型 family 必须从这五个里选一个：\n"
+        "  read=读数（读一个数值/结论）；list=列表（前N条/榜单/热搜/都有哪些）；"
+        "search=搜索（要输入关键词去搜）；send=发送（给别人发消息，有副作用）；"
+        "publish=发布（上传/发布内容，有副作用）。\n"
+        "goals = 把任务拆成 2-4 个「必须逐个到达的中间目标」，每个目标给：\n"
+        "  goal：一句话（做什么）；verify：到达该目标时屏幕上**一定会同时出现**的 1-2 个特征词"
+        "（要稳定、不要用会变的内容）；fallback：没到达时换什么入口重来。\n"
+        "steps = 把任务拆成**可直接执行的动作序列**（重点！系统会照它一次执行到底、逐步核对）：\n"
+        "  每步 {\"do\": ..., \"target\": ..., \"verify\": [...], \"n\": ...}，do 只能是这五种：\n"
+        "    open_app   —— 打开目标应用（不需要 target）\n"
+        "    tap        —— 点击屏幕上**文字等于或包含 target 的元素**；target 必须是该 App 里"
+        "真实存在的**短文字**（如「热榜」「市场情绪」「搜索」），不要写整句话、不要写坐标。"
+        "**拿不准入口叫什么时，用 targets 给 2-4 个候选**（如 [\"热门\",\"排行榜\",\"热门榜\"]），任一命中即可\n"
+        "    input_text —— 在输入框输入 value（一般先用 tap 点一下输入框）\n"
+        "    scroll     —— 滚动，direction 填 down 或 up\n"
+        "    read       —— 读答案：target=要读的元素文字；若是列表/榜单/前N条，额外给 n=条数\n"
+        "  verify（可选）：到达该步后屏幕上**一定会出现**的 1-2 个稳定特征词（用于逐步核对，"
+        "别用会变的内容）。**只有你很有把握时才给**；没把握就省略（系统会用包名等硬信号兜底核对）。\n"
+        "  最后一步必须是 read（产出答案）。只写「做什么」，**绝对不要写坐标**（坐标由系统运行时按 target 文字自动定位）。\n"
         "请只输出一个 JSON（不要多余文字、不要 markdown）：\n"
         "{\"intent\": \"一句话说明用户想要什么（已纠正错别字）\", "
         "\"app_label\": \"完成任务最需要的应用名（必须来自上面清单；没有则 null）\", "
         "\"app_package\": \"对应包名（必须来自上面清单；没有则 null）\", "
+        "\"family\": \"read|list|search|send|publish\", "
         "\"plan\": [\"第1步\", \"第2步\", \"第3步\", \"第4步\"], "
+        "\"goals\": [{\"goal\": \"第1个中间目标\", \"verify\": [\"特征词1\", \"特征词2\"], "
+        "\"fallback\": \"没到达时怎么做\"}], "
+        "\"steps\": [{\"do\": \"open_app\"}, {\"do\": \"tap\", \"target\": \"热榜\", \"verify\": [\"热榜\"]}, "
+        "{\"do\": \"read\", \"target\": \"热榜\", \"n\": 3}], "
         "\"success\": \"屏幕上出现什么即算完成（一句话）\", "
         "\"fallback\": \"若目标应用不存在或打不开，用什么替代方案（如用浏览器搜索XX）\"}"
         % (task[:400], app_lines[:2500]))
@@ -627,6 +702,8 @@ def qwen_plan(task, apps):
                 break
     d["app_package"] = real
     d["app_label"] = label
+    fam = str(d.get("family") or "").strip().lower()
+    d["family"] = fam if fam in ("read", "list", "search", "send", "publish") else ""
     return d
 
 
@@ -648,6 +725,27 @@ def render_plan(plan):
     if plan.get("success"):
         lines.append("【完成标准】%s" % plan["success"])
     return "\n".join(lines)
+
+
+def render_goals(goals, idx):
+    """子目标块（关卡三）：当前目标 + 整体进度 + 本目标的到达标志。"""
+    if not goals:
+        return ""
+    h = SL.goal_hint(goals, idx) if SL is not None else ""
+    if not h:
+        return ""
+    cur = goals[idx] if 0 <= idx < len(goals) else {}
+    ver = cur.get("verify") or {}
+    words = []
+    if isinstance(ver, dict):
+        words = [str(t) for t in (ver.get("text") or []) if t]
+    out = h
+    if words:
+        out += "｜到达标志：" + "、".join(words)
+    if cur.get("fallback"):
+        out += "｜没到达就改用：" + str(cur["fallback"])[:60]
+    out += "｜整体进度：%d/%d 个目标已完成" % (idx, len(goals))
+    return out
 
 
 # ---------------------------------------------------------------- 调试 trace
@@ -789,8 +887,10 @@ def render_experience(exps):
     return "\n".join(lines)
 
 
-def save_failure(task, reason, steps):
-    """任务失败时保存教训（按任务文本去重置顶，上限 30 条），下次同类任务注入"别再做"。"""
+def save_failure(task, reason, steps, stage="", pattern="", evidence=""):
+    """任务失败时保存教训（按任务文本去重置顶，上限 30 条），下次同类任务注入"别再做"。
+    2026-10-11：增加 stage（感知/规划/决策/执行/校验/锚点）与 pattern（错误签名）——
+    这样"同一个错误反复出现"才能被统计出来，进而编译成硬闸门（guards.json）。"""
     if not task or not steps:
         return
     try:
@@ -804,6 +904,8 @@ def save_failure(task, reason, steps):
             data = []
         data = [d for d in data if d.get("task") != task]
         data.insert(0, {"task": task, "kind": "failure", "reason": (reason or "")[:80],
+                        "stage": stage or "", "pattern": pattern or "",
+                        "evidence": (evidence or "")[:160],
                         "steps": steps[-12:], "ts": int(time.time())})
         with open(FAILURES_PATH, "w", encoding="utf-8") as f:
             json.dump(data[:30], f, ensure_ascii=False, indent=1)
@@ -918,9 +1020,10 @@ def bridge_cmd(cmd, timeout=8.0):
         return "err: %r" % (e,)
 
 
-def bridge_elements(timeout=8.0):
+def bridge_elements(timeout=8.0, dpy=0):
     """经 root 桥 + 小工头 App 取完整 a11y 树（含"不重要"视图，如微博信息流）。
-    替代 uiautomator：实测 uiautomator dump 会触发系统解绑 portal 的 a11y 服务。"""
+    替代 uiautomator：实测 uiautomator dump 会触发系统解绑 portal 的 a11y 服务。
+    dpy>0：只保留该显示屏（影子屏）窗口的元素（元素第 6 位 = displayId，App v1.1+ 提供）。"""
     out = os.path.expanduser("~/bridge/.tree.json")
     try:
         try:
@@ -934,8 +1037,12 @@ def bridge_elements(timeout=8.0):
         with open(out, encoding="utf-8", errors="replace") as f:
             d = json.load(f)
         raw = []
+        has_dpy = any(len(e) > 5 for e in (d.get("elems") or []))
         for e in d.get("elems") or []:
             try:
+                d6 = int(e[5]) if len(e) > 5 else None
+                if dpy > 0 and has_dpy and d6 != dpy:
+                    continue
                 raw.append((0, int(e[1]), int(e[2]), str(e[3]), bool(e[4])))
             except Exception:
                 continue
@@ -949,6 +1056,227 @@ def bridge_elements(timeout=8.0):
     except Exception as e:
         print("[agent] 桥取树失败: %r" % (e,))
         return []
+
+
+# ---------------------------------------------------------------- 微信发消息技能（T5：意图路由 → 预编译技能）
+# 背景：微信 8.0.52+ 对第三方 a11y"根级过滤"读不到树，但"点"可用 →
+#   用"唤醒屏→回列表→定位行→校验标题→点真键盘打字→校验输入→点发送→校验送达"的固定技能。
+# 路由：任务文本命中"给X发Y"句式 → 直接调 ~/wx_send.py（0 模型 0 视觉 + 四道本地校验），
+#   不进 Jev/qwen 慢循环；不命中则走原流程（对普通任务零影响）。
+WX_SEND_ON = os.environ.get("WX_SEND_SKILL", "1") == "1"
+WX_SEND_PY = os.path.expanduser(os.environ.get("WX_SEND_PY", "~/wx_send.py"))
+_PY3 = os.environ.get("AGENT_PY3", "/data/data/com.termux/files/usr/bin/python3")
+
+
+def parse_send_intent(task):
+    """共享解析器（~/wx_intent.py，console 也用）。缺失则不做路由（安全退化）。"""
+    try:
+        import wx_intent
+        return wx_intent.parse_send_intent(task)
+    except Exception:
+        return None
+
+
+def wx_send_skill(to, text, tracer=None, timeout=150):
+    """调手机本地发消息技能（agent 以 root 运行，直接子进程，无需 portal / 桥）。
+    返回 (ok, message)；失败含具体阶段原因（零静默错误）。"""
+    if not os.path.exists(WX_SEND_PY):
+        return False, "技能未部署（%s 不存在）" % WX_SEND_PY
+    outp = os.path.expanduser("~/bridge/.wx_last.json")
+    try:
+        os.remove(outp)
+    except OSError:
+        pass
+    t0 = time.time()
+    cmd = [_PY3, "-u", WX_SEND_PY, "--to", to, "--text", text, "--json-out", outp]
+    print("[wxsend] exec: %s" % " ".join(cmd))
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        out = (r.stdout or b"").decode("utf-8", "replace").strip().splitlines()
+        try:   # 技能完整日志留档（排障用；out 尾部只打印不落盘会丢）
+            with open(os.path.expanduser("~/bridge/.wx_last.log"), "w",
+                      encoding="utf-8") as f:
+                f.write("\n".join(out))
+        except Exception:
+            pass
+        for ln in out[-16:]:
+            print("[wxsend] " + ln)
+        rc = r.returncode
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()
+        if rc != 0 and err:
+            for ln in err.splitlines()[-8:]:
+                print("[wxsend][stderr] " + ln)
+    except Exception as e:
+        return False, "技能执行异常：%r" % (e,)
+    detail = {}
+    try:
+        with open(outp, encoding="utf-8") as f:
+            detail = json.load(f)
+    except Exception:
+        pass
+    el = round(time.time() - t0, 1)
+    if rc == 0 and detail.get("ok"):
+        return True, "已给 %s 发送「%s」（%.1f 秒，四道校验通过）" % (to, text,
+                                                              detail.get("elapsed", el))
+    return False, "没有送达：%s（%.1f 秒，安全中止）" % (detail.get("reason") or "exit=%d" % rc, el)
+
+
+# ---------------------------------------------------------------- 视觉兜底（a11y 树被屏蔽的 App，如微信 8.0.52+）
+# 背景：微信 8.0.52+ 对非系统白名单的无障碍服务"根节点直接过滤"（实测 portal 报
+#   "No active window or root filtered out"，树里只剩系统状态栏）→ 元素树感知彻底失效。
+# 对策：截图（无 FLAG_SECURE，可用）→ 多模态模型给"文字+坐标" → 伪元素清单，下游零改动。
+VISION_ON = os.environ.get("VISION_FALLBACK", "1") == "1"
+_LAST_PKG = [""]   # 最近一次已知前台包名（portal 读不到时用于判断"是不是被屏蔽的 App"）
+VISION_Q = ("这是安卓手机截图，分辨率 {w}x{h}（宽x高）。列出屏幕上所有可点击元素的中心坐标。"
+            "只输出 JSON 数组，不要解释、不要代码块。"
+            '每项形如 {{"label":"元素上的文字","x":X,"y":Y}}（X/Y 用 0-1000 归一化值）。最多 25 项。')
+
+VISION_BUILTIN = {"com.tencent.mm"}
+_VISION_APPS = None
+
+
+def vision_apps():
+    """需要用「截图+视觉」感知的 App = 内置 + ~/bridge/skills/vision_apps.json（list）。"""
+    global _VISION_APPS
+    if _VISION_APPS is None:
+        _VISION_APPS = set(VISION_BUILTIN)
+        try:
+            with open(os.path.expanduser("~/bridge/skills/vision_apps.json"), encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, list):
+                _VISION_APPS.update(str(x) for x in d)
+        except Exception:
+            pass
+    return _VISION_APPS
+
+
+def _png_size(png):
+    """PNG 头读宽高（Termux 侧没装 PIL，手工解析 IHDR）。"""
+    if len(png) >= 24 and png[:8] == b"\x89PNG\r\n\x1a\n":
+        return (int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big"))
+    raise ValueError("not png")
+
+
+def vision_elements(step=None, tracer=None):
+    """截图 → 多模态模型 → 伪元素 [(idx,x,y,label,True)]；失败返回 []。
+
+    坐标兼容两种模型输出：像素 或 0–1000 归一化（实测两种都出现，按"全 y ≤ 1000"判定）。
+    延迟实测 ~12s/次（1080x2400），所以只在"树被屏蔽"的 App 上启用。
+    """
+    if not VISION_ON:
+        return []
+    try:
+        png = Portal().screenshot_png()
+        w, h = _png_size(png)
+    except Exception as e:
+        print("[agent] 视觉兜底：截图失败 %r" % (e,))
+        return []
+    b64 = base64.b64encode(png).decode()
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": VISION_Q.format(w=w, h=h)},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}},
+    ]}]
+    try:
+        txt = call_llm(msgs, timeout=150, max_tokens=2048)
+    except Exception as e:
+        print("[agent] 视觉兜底：模型调用失败 %r" % (e,))
+        return []
+    items = []
+    m = re.search(r"\[[\s\S]*\]", txt or "")
+    if m:
+        try:
+            items = json.loads(m.group(0))
+        except Exception:
+            try:
+                items = json.loads(re.sub(r",\s*([\]}])", r"\1", m.group(0)))
+            except Exception:
+                items = []
+    ys = [it.get("y") for it in items if isinstance(it, dict) and isinstance(it.get("y"), (int, float))]
+    if ys and max(ys) <= 1000 and h > 1200:   # 归一化坐标 → 像素
+        for it in items:
+            for k, dim in (("x", w), ("y", h)):
+                v = it.get(k)
+                if isinstance(v, (int, float)):
+                    it[k] = int(round(v * dim / 1000.0))
+    out = []
+    for it in items[:25]:
+        try:
+            lb = str(it.get("label") or "").strip()
+            x, y = int(it.get("x")), int(it.get("y"))
+        except Exception:
+            continue
+        if lb and 0 <= x <= w and 0 <= y <= h:
+            out.append((len(out), x, y, lb[:60], True))
+    if out:
+        print("[step %s] 视觉兜底：%d 个元素" % (step, len(out)))
+        if tracer:
+            tracer.log(step, "result", "视觉兜底 %d 元素（截图+多模态）" % len(out))
+    return out
+
+
+# ---------------------------------------------------------------- 影子屏（正式模式）直控
+DISPLAY = 0   # >0 = 在影子屏上操作（正式模式；由 --display 参数设置）
+
+
+def _clean_env():
+    """剥离 Termux 的 LD_LIBRARY_PATH —— 否则系统二进制（input/am/dumpsys）会 CANNOT LINK。"""
+    env = dict(os.environ)
+    env.pop("LD_LIBRARY_PATH", None)
+    env.pop("LD_PRELOAD", None)
+    return env
+
+
+def input_cmd(args, timeout=15):
+    """root 直调 /system/bin/input（支持 -d N 指定显示屏）。失败抛异常。"""
+    r = subprocess.run(["/system/bin/input"] + [str(a) for a in args],
+                       capture_output=True, text=True, timeout=timeout, env=_clean_env())
+    if r.returncode != 0:
+        raise RuntimeError("input rc=%d %s" % (r.returncode, (r.stderr or "").strip()[:120]))
+
+
+def shadow_open_app(pkg, dpy, timeout=20):
+    """在影子屏上启动应用：解析入口 Activity → am start --display N。返回 None=成功，否则错误文案。
+    坑：**必须用 /system/bin/ 绝对路径** —— Termux 的 $PREFIX/bin 也有个 `am`（Termux:API 的），
+    PATH 里排在最前会把系统的 am 顶掉（2026-09-27 实测踩坑：open_app 全部静默失败）。"""
+    try:
+        r = subprocess.run(["/system/bin/cmd", "package", "resolve-activity", "--brief", pkg],
+                           capture_output=True, text=True, timeout=10, env=_clean_env())
+        comp = ""
+        for ln in reversed((r.stdout or "").strip().splitlines()):
+            ln = ln.strip()
+            if "/" in ln and " " not in ln:
+                comp = ln
+                break
+        if not comp:
+            return "无法解析入口 Activity：%s" % pkg
+        r = subprocess.run(["/system/bin/am", "start", "--display", str(dpy), "-n", comp],
+                           capture_output=True, text=True, timeout=timeout, env=_clean_env())
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode != 0 or "Error" in out:
+            return out[:160] or ("am rc=%d" % r.returncode)
+        return None
+    except Exception as e:
+        return "启动失败: %r" % (e,)
+
+
+def display_focus_pkg(dpy, timeout=8):
+    """影子屏当前前台应用包名（dumpsys window displays 按 Display 段解析）。"""
+    try:
+        r = subprocess.run(["/system/bin/dumpsys", "window", "displays"],
+                           capture_output=True, text=True, timeout=timeout, env=_clean_env())
+        cur = None
+        for ln in (r.stdout or "").splitlines():
+            m = re.search(r"Display: mDisplayId=(\d+)", ln)
+            if m:
+                cur = int(m.group(1))
+                continue
+            if cur == dpy:
+                m2 = re.search(r"mFocusedApp=ActivityRecord\{[^}]*?\bu0\s+([A-Za-z0-9_\.]+)/", ln)
+                if m2:
+                    return m2.group(1)
+    except Exception:
+        pass
+    return ""
 
 
 def fake_tree_from_elems(elems):
@@ -972,6 +1300,34 @@ def label_at(elems, x, y, tol=70):
         if abs(e[1] - x) <= tol and abs(e[2] - y) <= tol:
             return e[3]
     return ""
+
+
+def resolve_pick(elems, pick):
+    """pick → (x, y, label)。**准确率关键**：让模型只报"第几号元素"，坐标由本地精确给出。
+
+    接受三种写法：
+      · 数字/数字串  → 元素清单里的**编号**（最准；模型不用抄坐标、不用猜名字）
+      · 元素文本     → 精确相等优先，再前 6 字包含
+      · None/空      → None
+    """
+    if pick is None or isinstance(pick, (list, dict)):
+        return None
+    s = str(pick).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        i = int(s)
+        for e in elems:
+            if int(e[0]) == i:
+                return int(e[1]), int(e[2]), str(e[3])
+        return None
+    for e in elems:
+        if str(e[3]).strip() == s:
+            return int(e[1]), int(e[2]), str(e[3])
+    for e in elems:
+        if len(s) >= 2 and s[:6] in str(e[3]):
+            return int(e[1]), int(e[2]), str(e[3])
+    return None
 
 
 # ---------------------------------------------------------------- App 使用要点（经验卡雏形）
@@ -1024,42 +1380,65 @@ _APP_CARDS = None
 
 
 def normalize_app_card(v):
-    """统一 App 卡片格式 → {"hint": str, "spots": [{"label","x","y","whens"}]}
-    支持 str（纯提示文本）或 dict（{"hint":..., "spots": [["label",x,y,["特征词"...]], ...]}）。"""
+    """统一 App 卡片格式（2026-10-11 起委托 scripts_lib，结构升级为
+    {"hint","version","home_path","pages","spots"}；旧格式双向兼容）。"""
+    if SL is not None:
+        return SL.normalize_card(v)
     if isinstance(v, str):
-        return {"hint": v, "spots": []}
+        return {"hint": v, "version": 1, "home_path": None, "pages": [], "spots": []}
     if isinstance(v, dict):
         spots = []
         for s in (v.get("spots") or []):
             try:
                 spots.append({"label": str(s[0]), "x": int(s[1]), "y": int(s[2]),
-                              "whens": [str(w) for w in (s[3] if len(s) > 3 else [])]})
+                              "whens": [str(w) for w in (s[3] if len(s) > 3 else [])],
+                              "page": "", "hits": 0, "miss": 0, "last_ok": 0})
             except Exception:
                 pass
-        return {"hint": str(v.get("hint") or ""), "spots": spots}
-    return {"hint": "", "spots": []}
+        return {"hint": str(v.get("hint") or ""), "version": 1,
+                "home_path": v.get("home_path") if isinstance(v.get("home_path"), dict) else None,
+                "pages": [], "spots": spots}
+    return {"hint": "", "version": 1, "home_path": None, "pages": [], "spots": []}
 
 
 def app_cards():
-    """App 经验卡（统一格式，含坐标补丁 spots）= 内置 + ~/bridge/skills/apps.json（外部可覆盖/补充）。
-    外部若给 str，只覆盖 hint、保留内置 spots；给 dict 则整体覆盖。"""
+    """App 经验卡 = 内置 APP_HINTS_BUILTIN + ~/bridge/skills/apps.json。
+    外部 dict 采用**深合并**（只覆盖给了的字段：hint/home_path/pages/spots），
+    外部 str 只覆盖 hint（保留内置坐标与页面定义）。"""
     global _APP_CARDS
     if _APP_CARDS is None:
-        cards = {str(k): normalize_app_card(v) for k, v in APP_HINTS_BUILTIN.items()}
-        try:
-            with open(os.path.expanduser("~/bridge/skills/apps.json"), encoding="utf-8") as f:
-                d = json.load(f)
-            if isinstance(d, dict):
-                for k, v in d.items():
-                    k = str(k)
-                    if isinstance(v, dict):
-                        cards[k] = normalize_app_card(v)
-                    else:
-                        old = cards.get(k) or {"hint": "", "spots": []}
-                        cards[k] = {"hint": str(v), "spots": old.get("spots") or []}
-        except Exception:
-            pass
-        _APP_CARDS = cards
+        if SL is not None:
+            _APP_CARDS = SL.cards_of(APP_HINTS_BUILTIN)
+        else:
+            cards = {str(k): normalize_app_card(v) for k, v in APP_HINTS_BUILTIN.items()}
+            try:
+                with open(os.path.expanduser("~/bridge/skills/apps.json"), encoding="utf-8") as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    for k, v in d.items():
+                        k = str(k)
+                        old = cards.get(k)
+                        if isinstance(v, dict):
+                            nv = normalize_app_card(v)
+                            if not old:
+                                cards[k] = nv
+                                continue
+                            m = dict(old)
+                            if nv.get("hint"):
+                                m["hint"] = nv["hint"]
+                            if nv.get("home_path"):
+                                m["home_path"] = nv["home_path"]
+                            if nv.get("pages"):
+                                m["pages"] = nv["pages"]
+                            if nv.get("spots"):
+                                m["spots"] = nv["spots"]
+                            cards[k] = m
+                        else:
+                            old = old or normalize_app_card("")
+                            cards[k] = dict(old, hint=str(v))
+            except Exception:
+                pass
+            _APP_CARDS = cards
     return _APP_CARDS
 
 
@@ -1069,10 +1448,14 @@ def app_hint_of(pkg):
     return (c or {}).get("hint") or ""
 
 
-def app_coords(pkg, elems):
-    """App 经验坐标：页面特征词出现时，把实测坐标作为虚拟元素返回（Jev/qwen 可直接选用点击）。
-    - pkg 非空：只看该 App 的卡片；pkg 为空（portal 离线）：扫描全部卡片（靠特征词过滤）。
-    - 防重复：屏幕上已有坐标接近且同名元素时跳过。"""
+def app_coords(pkg, elems, cur_page="", dead=None):
+    """App 经验坐标 → 可注入的虚拟元素。
+    2026-10-11 升级：① 页面过滤（spot.page ≠ 当前页 → 不注入，治"错页误注入"）
+                    ② 坐标自校验（同名真实元素已在屏上 → 不注入；坐标被占且历史命中率差 → 判失效）
+                    ③ 本次运行失效名单 dead（点过没反应的坐标）
+    委托 scripts_lib.app_coords2；SL 不可用时退回旧逻辑。"""
+    if SL is not None:
+        return SL.app_coords2(pkg, elems, cur_page, dead, app_cards())
     cards = app_cards()
     if pkg:
         cand = [cards.get(pkg) or {}]
@@ -1168,6 +1551,531 @@ def match_apps_for_task(task, apps, limit=3):
     return out
 
 
+# ================================================================ 确定性骨架 · 支撑（2026-10-11）
+def get_activity():
+    """当前前台 包名/Activity（2 秒缓存）。影子屏 / anchors 不可用 → ""。"""
+    if not SW_ANCHORS or AN is None or DISPLAY > 0:
+        return ""
+    now = time.time()
+    if _ACT_CACHE["v"] and now - _ACT_CACHE["ts"] < 2.0:
+        return _ACT_CACHE["v"]
+    v = ""
+    try:
+        v = AN.current_activity(0)
+    except Exception:
+        v = ""
+    _ACT_CACHE.update({"ts": now, "v": v})
+    return v
+
+
+def get_fp():
+    """当前屏标题墨迹指纹（3 秒缓存）。截图失败（FLAG_SECURE/影子屏）→ None。"""
+    if not SW_ANCHORS or AN is None or DISPLAY > 0:
+        return None
+    now = time.time()
+    if _FP_CACHE["v"] is not None and now - _FP_CACHE["ts"] < 3.0:
+        return _FP_CACHE["v"]
+    fp = None
+    try:
+        raw = AN.capture_raw(0)
+        fp = AN.fingerprint(raw) if raw else None
+    except Exception:
+        fp = None
+    _FP_CACHE.update({"ts": now, "v": fp})
+    return fp
+
+
+def _anchor_has_fp(a):
+    return bool(isinstance(a, dict) and a.get("fingerprint"))
+
+
+def _anchor_has_act(a):
+    return bool(isinstance(a, dict) and a.get("activity"))
+
+
+def verify_anchor(anchors, elems):
+    """三级锚点验收。按需取 act/fp —— 锚点没用到就不付 dumpsys/screencap 的代价。"""
+    if SL is None:
+        return False
+    act = get_activity() if _anchor_has_act(anchors) else ""
+    fp = get_fp() if _anchor_has_fp(anchors) else None
+    return SL.verify_anchors(anchors, elems, act, fp)
+
+
+def page_of(pkg, elems):
+    """当前页面身份（""=未知页）。"""
+    if SL is None or not pkg:
+        return ""
+    cards = app_cards()
+    card = cards.get(pkg) or {}
+    act = get_activity() if any(pg.get("activity") for pg in (card.get("pages") or [])) else ""
+    return SL.page_id(pkg, elems, act, None, cards)
+
+
+def _do_action_simple(act, portal):
+    """最小动作执行器（起点归位 / 脚本重放共用）。"""
+    a = str(act.get("action") or "")
+    if a == "key":
+        portal.key(int(act.get("key_code", 4)))
+        time.sleep(0.8)
+    elif a == "tap":
+        portal.tap(int(act["x"]), int(act["y"]))
+        time.sleep(0.6)
+    elif a == "swipe":
+        portal.swipe(act.get("x1", 0), act.get("y1", 0), act.get("x2", 0),
+                     act.get("y2", 0), act.get("duration", 500))
+        time.sleep(0.6)
+    elif a == "input_text":
+        portal.input_text(str(act.get("text") or ""), bool(act.get("clear")))
+        time.sleep(0.6)
+    elif a == "open_app":
+        portal.open_app(str(act.get("package") or ""))
+        time.sleep(2.0)                                   # 冷启动初等（随后由"等到前台"兜）
+    elif a == "wait":
+        time.sleep(float(act.get("seconds") or 1.5))
+    else:
+        return False
+    return True
+
+
+def _script_elems(portal):
+    """脚本重放用的轻量感知（portal → 桥树补盲）。返回 (elems, cur_pkg)。"""
+    elems, cur = [], ""
+    try:
+        st = portal.get_state()
+        elems = collect_elements(st)
+        cur = (st.get("phone_state") or {}).get("packageName") or ""
+    except Exception:
+        elems = []
+    try:
+        if len(elems) < 8 or cur in blind_apps():
+            ex = bridge_elements()
+            if len(ex) > len(elems):
+                elems = ex
+    except Exception:
+        pass
+    return elems, cur
+
+
+def _script_tap_spot(name, step, portal):
+    """脚本 tap：**多候选 + 多策略**（精确 → 包含 → 前缀 → 滚动再找 → 卡片坐标）。
+
+    2026-10-12 实证：模型/脚本给的 target 常与屏幕上文字对不上（B站要「热门」，屏幕上是
+    「热门榜」；骨架第 2 步就因此断掉）。故支持候选列表 + 逐步放宽匹配 + 找不到就滚一次再找。"""
+    step = step if isinstance(step, dict) else {}
+    names = []
+    tv = step.get("texts")
+    if isinstance(tv, list):
+        names = [str(x).strip() for x in tv if str(x).strip()]
+    nm0 = str(name or "").strip()
+    if nm0 and nm0 not in names:
+        names.insert(0, nm0)
+
+    def _scan(elems):
+        for nm in names:                      # ① 精确相等
+            for e in elems:
+                if str(e[3]).strip() == nm:
+                    return e
+        for nm in names:                      # ② 候选是元素文字的子串
+            if len(nm) < 2:
+                continue
+            for e in elems:
+                if nm in str(e[3]):
+                    return e
+        for nm in names:                      # ③ 前 4 字前缀
+            if len(nm) < 2:
+                continue
+            for e in elems:
+                if nm[:4] in str(e[3]):
+                    return e
+        return None
+
+    elems, _cur = _script_elems(portal)
+    hit = _scan(elems)
+    if hit is None and names:                 # ④ 滚动一次再找（元素可能在屏幕外）
+        try:
+            portal.swipe(540, 1700, 540, 700, 500)
+            time.sleep(0.9)
+            elems, _cur = _script_elems(portal)
+            hit = _scan(elems)
+        except Exception:
+            pass
+    if hit is not None:
+        portal.tap(int(hit[1]), int(hit[2]))
+        return True, ""
+    xy = step.get("xy")
+    if xy and len(xy) >= 2:
+        portal.tap(int(xy[0]), int(xy[1]))
+        return True, ""
+    for nm in names:                          # ⑤ 卡片实测坐标
+        key = nm[:4]
+        if not key:
+            continue
+        for _pkg, card in app_cards().items():
+            for sp in (card.get("spots") or []):
+                lbl = str(sp.get("label") or "")
+                if key and (lbl.startswith(key) or key in lbl):
+                    portal.tap(int(sp["x"]), int(sp["y"]))
+                    return True, ""
+    return False, ("屏幕上与卡片里都找不到「%s」" % "/".join(names)) if names else "未指定 tap 目标"
+
+
+def _script_rank(n, portal, rounds=4):
+    """榜单提取：读当前屏 + 向下滚动收集（复用 extract_rank_pairs）。"""
+    n = max(1, int(n))
+    acc = {}
+    for _ in range(max(1, int(rounds))):
+        elems, _cur = _script_elems(portal)
+        try:
+            for score, title in extract_rank_pairs(elems):
+                if title not in acc or acc[title] < score:
+                    acc[title] = score
+        except Exception:
+            pass
+        if len(acc) >= n + 2:
+            break
+        try:
+            portal.swipe(540, 1700, 540, 700, 500)
+        except Exception:
+            break
+        time.sleep(0.8)
+    if len(acc) < n:
+        return ""
+    items = sorted(acc.items(), key=lambda kv: -kv[1])[:n]
+    return "\n".join("%d. %s" % (i, t) for i, (t, _s) in enumerate(items, 1))
+
+
+def _script_read_text(t, portal, dy=30):
+    """读"含指定关键词的元素文本"。
+    数值常被拆到相邻元素（如「实际涨停:」+「69家」、「07:00」+「法定工作日|起床闹铃」）
+    → 当锚点文本**较短（≤12 字）**时，把同行邻近（|Δy| ≤ dy，|Δx| ≤ 420）的文本拼进来。
+    长文本（如日历「已选中,10月11日,…没有日程」）直接原样返回，避免把整行日历拼成噪声。"""
+    elems, _cur = _script_elems(portal)
+    for e in elems:
+        s = str(e[3]).strip()
+        if not (t and t in s):
+            continue
+        if len(s) > 12:                       # 长文本已是完整答案 → 原样返回
+            return s
+        row = [(o[1], str(o[3]).strip()) for o in elems
+               if abs(o[2] - e[2]) <= int(dy) and abs(o[1] - e[1]) <= 420
+               and str(o[3]).strip()]
+        row.sort()
+        parts = []
+        for _x, txt in row:
+            if txt not in parts:
+                parts.append(txt)
+        return " ".join(parts) if parts else s
+    return ""
+
+
+# 挡路的一次性弹窗：判定**极严**（2026-10-11 血泪：早期版本把「已关闭」「所有闹钟已关闭」
+# 这类**状态文字**、以及设置页的**蓝牙开关**（标签正好是「关闭」）当成弹窗按钮点了）。
+# 规则：
+#   · 有辨识度的多字短语（跳过/我知道了/以后再说…）→ 允许"包含"匹配，无位置限制
+#   · 通用短词（关闭/取消/暂不/以后）→ 必须**完全相等**，且必须在屏幕**下半部**
+#     （对话框的按钮通常在下方；设置页的开关/标签在上方）
+DISMISS_EXACT_LOW = ("关闭", "取消", "暂不", "以后")
+DISMISS_PHRASES = ("跳过", "以后再说", "稍后再说", "暂不更新", "不更新",
+                   "下次再说", "我知道了", "知道了")
+
+
+def _dismiss_popups(portal, elems, tracer=None, max_n=2):
+    """点掉挡路的一次性弹窗（更新提示/广告/引导）。返回点掉的个数。"""
+    n = 0
+    try:
+        h_est = max([e[2] for e in elems] or [2400]) or 2400
+    except Exception:
+        h_est = 2400
+    y_low = int(h_est * 0.4)                     # 通用短词只认"下半屏"
+    for _ in range(max(0, int(max_n))):
+        hit = None
+        for e in elems:
+            if not e[4]:                          # 必须可点
+                continue
+            s = str(e[3]).strip()
+            if not s or len(s) > 12:
+                continue
+            if any(w in s for w in DISMISS_PHRASES):
+                hit = e
+                break
+            if s in DISMISS_EXACT_LOW and int(e[2]) >= y_low:
+                hit = e
+                break
+        if not hit:
+            break
+        try:
+            portal.tap(int(hit[1]), int(hit[2]))
+            n += 1
+            print("[agent] 关闭挡路弹窗：%s (%d,%d)" % (hit[3], hit[1], hit[2]))
+            if tracer:
+                tracer.log(0, "result", "关闭弹窗: %s" % hit[3])
+            time.sleep(1.0)
+        except Exception:
+            break
+        elems, _c = _script_elems(portal)
+    return n
+
+
+# 登录提示的"关闭类"文案（点它 = 先不看登录，继续用）
+LOGIN_DISMISS = ("关闭", "以后再说", "稍后再", "暂不", "跳过", "取消", "我知道了", "知道了",
+                 "不登录", "先逛逛", "随便看看", "游客", "×", "✕", "✗", "x")
+ALERT_OGG = "/sdcard/xgt_alert.ogg"
+
+
+def _dismiss_login(portal, elems, tracer=None):
+    """关掉**登录提示**并继续任务（**不停止**）。
+
+    2026-10-12 用户口径：很多 App 只是"弹一下"登录，关掉就能继续用；不该一看到登录页就停。
+    返回 True = 做了关闭动作（调用方可重新感知后继续）。"""
+    hit = None
+    for e in elems:
+        s = str(e[3]).strip()
+        if not s or len(s) > 8:
+            continue
+        for w in LOGIN_DISMISS:
+            if s == w or (len(w) >= 2 and w in s):
+                hit = e
+                break
+        if hit:
+            break
+    if hit is not None:
+        try:
+            portal.tap(int(hit[1]), int(hit[2]))
+            print("[agent] 关闭登录提示：%s (%d,%d)" % (hit[3], hit[1], hit[2]))
+            if tracer:
+                tracer.log(0, "result", "关闭登录提示: %s" % hit[3])
+            time.sleep(1.0)
+            return True
+        except Exception:
+            pass
+    try:
+        portal.key(4)                     # 没有关闭按钮 → 试一次返回键
+        print("[agent] 登录提示无关闭按钮 → 按返回键尝试离开")
+        time.sleep(0.8)
+        return True
+    except Exception:
+        return False
+
+
+def alert_user(title, text, tracer=None):
+    """提醒用户（**通知 + 声音**），用于"真的需要登录"时叫人来处理。
+
+    声音分层兜底（本机实测可用性）：
+      ① 系统提示音文件 /product/media/audio/ui/*.ogg 用 am 播放（短促、明显）
+      ② 再补一条通知横幅（即使没声音也能看到）
+    注意：本机无 termux-api / 无 cmd vibrator，故走"am 播放系统提示音"这条路。"""
+    ok_sound = False
+    try:
+        if not os.path.exists(ALERT_OGG):
+            subprocess.run(["/system/bin/sh", "-c",
+                            "cp /product/media/audio/ui/InCallNotification.ogg %s 2>/dev/null"
+                            % ALERT_OGG], timeout=8)
+        if os.path.exists(ALERT_OGG):
+            subprocess.run(["/system/bin/am", "start", "-a", "android.intent.action.VIEW",
+                            "-d", "file://" + ALERT_OGG, "-t", "audio/ogg"],
+                           capture_output=True, timeout=10)
+            ok_sound = True
+    except Exception as e:
+        print("[agent] 播放提示音失败: %r" % (e,))
+    try:
+        subprocess.run(["/system/bin/sh", "-c",
+                        "cmd notification post -S bigtext -t '%s' xgt_alert '%s'"
+                        % (str(title).replace("'", ""), str(text).replace("'", ""))],
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass
+    print("[agent] 已提醒用户：%s｜%s（声音=%s）" % (title, text, "已播放" if ok_sound else "未播放"))
+    if tracer:
+        tracer.log(0, "result", "提醒用户: %s" % text)
+
+
+def _maybe_home_reset(pkg, elems, portal, tracer=None, done_set=None, target=None, fg_pkg=None):
+    """关卡一 · 起点归位：目标 App 在前台但不在已知页（或落在死胡同页）→ 按卡片返航。
+    返回 True=执行过归位。每个 App 每次运行最多归位一次（done_set 记账）。
+    fg_pkg：当前真实前台包名 —— 与 pkg 不一致时**不归位**（防"App 还没起来就按返回键把它退掉"）。"""
+    if not SW_HOME or SL is None or DISPLAY > 0 or not pkg:
+        return False
+    if done_set is not None and pkg in done_set:
+        return False
+    if fg_pkg and fg_pkg != pkg:
+        print("[agent] 归位跳过：当前前台是 %s，不是目标 App %s" % (fg_pkg, pkg))
+        return False
+    cards = app_cards()
+    card = cards.get(pkg) or {}
+    if not card.get("home_path"):
+        return False
+    # 先点掉挡路的一次性弹窗 —— 否则"首页特征"被弹窗盖住，会被误判成"不在已知页"
+    if _dismiss_popups(portal, elems, tracer):
+        elems, _c = _script_elems(portal)
+    act = get_activity() if any(pg.get("activity") for pg in (card.get("pages") or [])) else ""
+    if not SL.need_home(pkg, elems, act, None, cards, target=target):
+        return False
+    steps = SL.home_steps(card)
+    if not steps:
+        return False
+    if done_set is not None:
+        done_set.add(pkg)
+    print("[agent] 起点归位：%s 当前不在已知页 → 执行 %d 步返航" % (pkg, len(steps)))
+    if tracer:
+        tracer.log(0, "result", "起点归位 %s（%d 步）" % (pkg, len(steps)))
+    until = SL.home_until(card)
+    ok = False
+    # 逐步执行 + 每步验收：达标即停（多余的 BACK 会把 App 退到桌面）
+    for a in steps:
+        try:
+            _do_action_simple(a, portal)
+        except Exception:
+            pass
+        el2, _c2 = _script_elems(portal)
+        if until and any(w in "|".join(str(e[3]) for e in el2) for w in until):
+            ok = True
+            break
+        if _c2 and _c2 != pkg:
+            print("[agent] 归位中止：已离开 %s（当前 %s）→ 重新打开该 App 兜底" % (pkg, _c2))
+            try:
+                portal.open_app(pkg)
+                time.sleep(2.0)
+            except Exception:
+                pass
+            break
+    if not ok:
+        for _ in range(3):                       # 页面可能还在渲染，补一轮等待
+            time.sleep(1.0)
+            el2, _c2 = _script_elems(portal)
+            if until and any(w in "|".join(str(e[3]) for e in el2) for w in until):
+                ok = True
+                break
+    print("[agent] 归位%s" % ("成功（已回到已知页）" if ok else "未确认（继续任务）"))
+    if tracer:
+        tracer.log(0, "result", "归位%s" % ("成功" if ok else "未确认"))
+    return True
+
+
+def _sys_truth(task):
+    """**系统实测真值**：能用系统 API 直读的，就别让模型"看图猜"（2026-10-12 新增）。
+
+    场景：任务问"现在连的 WiFi 叫什么"，模型在设置页读到"未发现可用网络"就作答 ——
+    而 `dumpsys wifi` 明明写着 SSID=Xiaomi_3ADA。用系统真值交叉核对，能直接拦下这类错答。
+    返回 {"wifi": ssid, "battery": "68"}（取不到就不放键）。"""
+    out = {}
+    t = str(task or "")
+
+    def _env():
+        e = dict(os.environ)
+        e.pop("LD_LIBRARY_PATH", None)
+        e.pop("LD_PRELOAD", None)
+        return e
+    try:
+        if any(w in t for w in ("wifi", "WIFI", "WiFi", "无线", "WLAN", "wlan", "局域网")):
+            r = subprocess.run(["/system/bin/dumpsys", "wifi"], capture_output=True, text=True,
+                               timeout=10, env=_env())
+            m = re.search(r'mWifiInfo SSID: "([^"]*)"', r.stdout or "")
+            if m and m.group(1) and m.group(1) != "<unknown ssid>":
+                out["wifi"] = m.group(1)
+    except Exception:
+        pass
+    try:
+        if any(w in t for w in ("电量", "电池")):
+            r = subprocess.run(["/system/bin/dumpsys", "battery"], capture_output=True, text=True,
+                               timeout=8, env=_env())
+            m = re.search(r"^\s*level:\s*(\d+)", r.stdout or "", re.M)
+            if m:
+                out["battery"] = m.group(1)
+    except Exception:
+        pass
+    return out
+
+
+def _finalize_answer(task, plan, family, answer, source, tracer=None):
+    """关卡四 · 收工结果复核（规则优先，0 模型调用）。
+
+    用户要求「每个步骤都必须是正确的，防止莫名其妙的错误」：
+      过程正确 → 每步三级锚点（本地）
+      答案正确 → 本函数（本地规则）
+    规则只做高置信度判定，不确定时放行。返回 (ok, reason)；ok=False → 调用方应视为失败。
+    """
+    if not SW_REVIEW or SL is None:
+        return True, ""
+    try:
+        ok, why = SL.review_answer(task, answer, plan, family)
+    except Exception as e:
+        print("[agent] 结果复核异常（放行）: %r" % (e,))
+        return True, ""
+    if ok:
+        print("[agent] 结果复核通过（%s）" % source)
+    else:
+        print("[agent] 结果复核未过（%s）：%s" % (source, why))
+        if tracer:
+            tracer.log(0, "result", "结果复核未过(%s): %s" % (source, why))
+    return ok, why
+
+
+def replay_script(sc, tracer=None):
+    """关卡二 · 脚本重放。返回 (ok, result, log, broken_at)。"""
+    if SL is None:
+        return False, "", ["scripts_lib 不可用"], 0
+    p = Portal()
+
+    def _do(act):
+        try:
+            return (True, "") if _do_action_simple(act, p) else \
+                   (False, "动作不支持：%s" % act.get("action"))
+        except Exception as e:
+            return False, repr(e)
+
+    def _after_step(i, st):
+        # open_app 之后：① 先等 App 真正到前台（冷启动最长约 8 秒）
+        #               ② 若落在未知/死胡同页 → 按卡片返航（治"App 恢复上次页面"）
+        if str(st.get("do") or "") != "open_app":
+            return
+        pkg = str(st.get("package") or sc.get("app") or "")
+        if not pkg:
+            return
+        # 等「到前台」+「界面加载稳定」+「页面身份可识别」（三条件齐了才动手）
+        #   2026-10-11 血泪：只等"元素数稳定"不够——开盘啦冷启动时会先渲染出 10 个元素
+        #   （顶栏+底栏，没有首页图标），数量稳定但内容没出来 → 脚本第 1 步误判失败。
+        el, fg, prev, stable = [], "", -1, 0
+        for _ in range(14):
+            el, fg = _script_elems(p)
+            try:
+                _pg = page_of(pkg, el) if fg == pkg else ""
+            except Exception:
+                _pg = ""
+            if fg == pkg and len(el) >= 8 and _pg and len(el) == prev:
+                break
+            prev = len(el)
+            time.sleep(1.0)
+        if fg and fg != pkg:
+            print("[script] 等待 %s 到前台超时（当前 %s）" % (pkg, fg))
+            return
+        if _dismiss_popups(p, el, tracer):
+            time.sleep(1.0)
+            el, _fg2 = _script_elems(p)
+        # 脚本重放：必须在"入口页"起步 —— 不在就先归位（治"App 恢复上次的详情页"）
+        _tgt = None
+        try:
+            if SL is not None:
+                _tgt = SL.entry_pages(app_cards().get(pkg) or {}) or None
+        except Exception:
+            _tgt = None
+        _maybe_home_reset(pkg, el, p, tracer, done_set=_HOME_DONE, fg_pkg=fg or pkg, target=_tgt)
+
+    ctx = {
+        "get_elems": lambda: _script_elems(p)[0],
+        "get_activity": lambda: get_activity(),
+        "get_fp": lambda: get_fp(),
+        "do_action": _do,
+        "tap_spot": lambda name, step: _script_tap_spot(name, step, p),
+        "extract_rank": lambda n: _script_rank(n, p),
+        "read_text": lambda t, st: _script_read_text(
+            t, p, dy=int((st or {}).get("dy") or 30)),
+        "after_step": _after_step,
+        "log": (lambda s: tracer.log(0, "result", "script: " + s)) if tracer else None,
+    }
+    return SL.replay(sc, ctx)
+
+
 class Progress:
     """连续无进展检测器（纯逻辑，可单测）。
 
@@ -1248,17 +2156,22 @@ class Progress:
         return flags
 
 
-def decide(step, task, state, history, engine_now, elems, experience=None, related_apps=None, plan=None):
+def decide(step, task, state, history, engine_now, elems, experience=None, related_apps=None,
+           plan=None, goal_text=""):
     """返回 (act, engine_name, seconds, trace_info)。trace_info = {"prompt":..., "reply":...}"""
     t0 = time.time()
-    if engine_now == "jev":
+    if engine_now == "jev" and _JEV_FAILS[0] >= 2:
+        # jev 连续失败（如 451 / 连不上）→ 本次运行不再尝试，直接走 qwen（省一次无效往返/步）
+        pass
+    elif engine_now == "jev":
         try:
             cur_pkg = ""
             try:
                 cur_pkg = (state.get("phone_state") or {}).get("packageName") or ""
             except Exception:
                 pass
-            answers = jev_decide(task, elems, history, experience, related_apps, cur_pkg, plan)
+            answers = jev_decide(task, elems, history, experience, related_apps, cur_pkg,
+                                 plan, goal_text)
             act = jev_to_action(answers.get("target"), elems, related_apps)
             ans_pick = (answers.get("answer") or {}).get("choice", "none")
             if isinstance(ans_pick, str) and ans_pick.startswith("elem_"):
@@ -1275,9 +2188,13 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
             if experience:
                 tips += "\n[已注入经验 %d 条]" % len(experience)
             ti = {"prompt": tips, "reply": json.dumps(answers, ensure_ascii=False)[:1200]}
+            _JEV_FAILS[0] = 0
             return act, "jev", time.time() - t0, ti
         except Exception as e:
-            print("[step %d] jev failed: %r -> qwen fallback" % (step, e))
+            _JEV_FAILS[0] += 1
+            print("[step %d] jev failed: %r -> qwen fallback（连续失败 %d 次%s）"
+                  % (step, e, _JEV_FAILS[0],
+                     "，本次运行起不再尝试 jev" if _JEV_FAILS[0] == 2 else ""))
     screen = render_elems(elems) if elems else render_tree(state)
     exp_text = render_experience(experience)
     exp_block = ("\n\n参考经验（上次类似任务的成功做法，可借鉴；若与实际屏幕不符则忽略）：\n" + exp_text) \
@@ -1297,8 +2214,23 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
         pass
     plan_text = render_plan(plan)
     plan_block = ("\n\n" + plan_text) if plan_text else ""
-    user = ("任务: %s%s\n\n第 %d 步。当前屏幕元素清单：\n%s%s%s%s\n\n"
-            "请输出下一步动作 JSON。" % (task, plan_block, step, screen, exp_block, app_hint, app_note))
+    goal_block = ("\n\n" + goal_text +
+                  "\n（只专注完成「当前子目标」；它达成后再推进下一个。全部子目标达成即可 done。）") \
+        if goal_text else ""
+    # 当前页面身份（2026-10-12）：模型常因"两个页共用同一 Activity"而误判自己在哪 ——
+    # 把 App/页面名明确告诉它，能显著减少"以为在首页其实在子页"这类错误。
+    page_note = ""
+    try:
+        _pk2 = (state.get("phone_state") or {}).get("packageName") or ""
+        if _pk2:
+            _pg = page_of(_pk2, elems)
+            page_note = "\n\n【当前页面】%s%s" % (_pk2, ("｜%s" % _pg) if _pg else "（未登记页面）")
+    except Exception:
+        page_note = ""
+    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s\n\n"
+            "请输出下一步动作 JSON（点元素优先用 pick 报编号）。"
+            % (task, plan_block, goal_block, page_note, step, screen,
+               exp_block, app_hint, app_note))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-10:] + \
                [{"role": "user", "content": user}]
     reply = call_llm(messages)
@@ -1309,7 +2241,7 @@ def parse_args():
     argv = sys.argv[1:]
     kv = {}
     positional = []
-    flags = {"--max-steps", "--engine", "--upgrade-after"}
+    flags = {"--max-steps", "--engine", "--upgrade-after", "--display"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -1327,19 +2259,61 @@ def parse_args():
     if mode not in ("auto", "jev", "qwen"):
         mode = "auto"
     try:
-        max_steps = int(kv.get("--max-steps") or os.environ.get("MAX_STEPS", "25"))
+        max_steps = int(kv.get("--max-steps") or os.environ.get("MAX_STEPS", "100"))
     except ValueError:
-        max_steps = 25
+        max_steps = 100
     try:
         upgrade_after = int(kv.get("--upgrade-after") or os.environ.get("UPGRADE_AFTER", "3"))
     except ValueError:
         upgrade_after = 3
-    return task, max_steps, mode, upgrade_after
+    try:
+        display = int(kv.get("--display") or os.environ.get("AGENT_DISPLAY", "0"))
+    except ValueError:
+        display = 0
+    return task, max_steps, mode, upgrade_after, display
 
 
 def main():
+    global DISPLAY
     os.makedirs(OUT_DIR, exist_ok=True)
-    task, max_steps, mode, upgrade_after = parse_args()
+    task, max_steps, mode, upgrade_after, display = parse_args()
+    DISPLAY = display
+    if DISPLAY > 0:
+        print("[agent] 正式模式：全部操作在影子屏 display=%d 上执行" % DISPLAY)
+
+    # —— 意图路由：微信发消息技能（0 模型 0 视觉；不命中则走原流程。影子屏模式不路由） ——
+    if WX_SEND_ON and DISPLAY == 0:
+        intent = parse_send_intent(task)
+        if intent:
+            to, text = intent
+            # 代词护栏（语音口误常见）："给那个发…"→ 无法确定对象 → 安全停，
+            # 绝不拿代词去列表里"找最像的"（防认错人）。
+            try:
+                import wx_intent as _wi
+                _is_pro = getattr(_wi, "is_pronoun", None)
+            except Exception:
+                _is_pro = None
+            if _is_pro and _is_pro(to):
+                msg = ("没听清要发给谁（听到的是「%s」）——请说清名字，"
+                       "比如「给浩浩发 test」。这条没有执行任何操作。" % to)
+                print("[agent] 意图路由命中，但收件人是代词「%s」→ 安全停（0 点击 0 输入）" % to)
+                tr = Tracer(TRACE_PATH or os.path.join(OUT_DIR, "agent_trace.jsonl"))
+                tr.log(0, "result", msg)
+                print("[agent] FAILED: %s" % msg)
+                tr.close()
+                return 3
+            tr = Tracer(TRACE_PATH or os.path.join(OUT_DIR, "agent_trace.jsonl"))
+            print("[agent] 意图路由 → 微信发消息技能：给 %s 发「%s」（0 模型 0 视觉）" % (to, text))
+            tr.log(0, "action", "wxsend to=%s text=%s" % (to, text))
+            ok, msg = wx_send_skill(to, text, tr)
+            if ok:
+                print("[agent] DONE: %s" % msg)
+                tr.log(1, "done", msg)
+            else:
+                print("[agent] FAILED: %s" % msg)
+                tr.log(1, "result", msg)
+            tr.close()
+            return 0 if ok else 3
 
     portal = Portal()
     history = []
@@ -1353,6 +2327,7 @@ def main():
     fail_counts = {}   # 动作签名 -> 连续失败次数（>=2 硬阻断）
     no_effect = {}     # tap 签名 -> 连续"屏幕无变化"次数（>=2 视为无效点击）
     last_sig, last_ok, last_hash = None, None, None
+    last_pick = ""     # 上一步 tap 的目标文字（用于标记失效的经验坐标）
     block_streak = 0   # 连续被系统拒绝的次数
     done_rejects = 0   # done 被防幻觉复核驳回的次数（上限 2）
     scroll_streak = 0  # 连续滚动/滑动次数（迷路检测：≥6 次强制升级）
@@ -1362,6 +2337,12 @@ def main():
     rank_ready = False       # 榜单收集足够（已提示可直接作答）
     rank_collect_hint = False  # 榜单收集催促（只发一次）
     kb_switched = False        # 键盘弹出已触发 qwen 接管（只触发一次）
+    tap_seen = {}              # tap 坐标签名 -> 累计次数（≥4 → 封禁该坐标）
+    goal_hinted = set()        # 已发过软提示的子目标（同一目标只提示一次，避免刷屏干扰）
+    max_block_streak = 0       # 本次运行的最大连败（供失败归类 / 脚本固化判定）
+    min_elems_seen = 999       # 本次运行见过的最少元素数（感知是否失效）
+    anchor_miss = 0            # 页面身份未命中次数（锚点是否够硬）
+    errs = []                  # 执行错误文案（供失败归类）
 
     print("[agent] task: %s" % task)
     print("[agent] mode: %s | start engine: %s | upgrade-after: %d | max-steps: %d" %
@@ -1410,8 +2391,180 @@ def main():
         print("[agent] 任务相关应用: %s" % "、".join(
             "%s(%s)" % (ra["label"], ra["package"]) for ra in related_apps))
 
+    # ================================ 关卡〇 · 开工闸门（可行性 + 分级预算）—— 2026-10-11
+    family = ""
+    if SW_FAMILY and SL is not None:
+        try:
+            family = SL.match_family(plan, task)
+        except Exception:
+            family = ""
+    if family:
+        try:
+            print("[agent] 任务家族: %s（%s，预算 %d 步）"
+                  % (family, (SL.load_families().get(family) or {}).get("name", ""),
+                     SL.budget_of(family)))
+        except Exception:
+            print("[agent] 任务家族: %s" % family)
+    if SW_BUDGET and SL is not None and family:
+        try:
+            _bud = SL.budget_of(family)
+            if _bud and _bud < max_steps:
+                print("[agent] 预算收紧: %d → %d 步" % (max_steps, _bud))
+                max_steps = _bud
+        except Exception:
+            pass
+
+    _gate_elems, _gate_pkg = [], ""
+    if SW_GATE and SL is not None:
+        try:
+            _stg = portal.get_state()
+            _gate_elems = collect_elements(_stg)
+            _gate_pkg = (_stg.get("phone_state") or {}).get("packageName") or ""
+        except Exception:
+            _gate_elems = []
+        try:
+            _ok_fe, _why_fe, _kind_fe = SL.feasibility_check(plan, apps, task, family, _gate_elems)
+            if not _ok_fe:
+                _m = "无法完成：%s" % _why_fe
+                print("[agent] 开工闸门拦下（%s）：%s" % (_kind_fe, _why_fe))
+                tracer.log(0, "result", "开工闸门(%s): %s" % (_kind_fe, _why_fe))
+                print("[agent] DONE: %s" % _m)
+                tracer.log(1, "done", _m)
+                tracer.close()
+                return 0
+        except Exception as e:
+            print("[agent] 开工闸门异常（跳过）: %r" % (e,))
+
+    # ================================ 关卡二 · 脚本重放（命中则 0 决策直跑；失败自动降级）
+    _sc_hit = False
+    if SW_SCRIPT and SL is not None and DISPLAY == 0:
+        try:
+            _sc = SL.match_script(task, family, _gate_pkg, apps)
+            if _sc:
+                _sc_hit = True
+                print("[agent] 命中脚本「%s」（family=%s，历史 %s/%s）→ 重放"
+                      % (_sc.get("name"), _sc.get("family"),
+                         _sc.get("ok") or 0, _sc.get("runs") or 0))
+                tracer.log(0, "action", "script replay: %s" % _sc.get("id"))
+                _ok0, _res0, _lg0, _brk0 = replay_script(_sc, tracer)
+                for _l in _lg0:
+                    print("[script] " + _l)
+                try:
+                    SL.promote_candidate(_sc.get("id"), _ok0)
+                except Exception:
+                    pass
+                if _ok0 and _res0:                 # 必须有实际答案才算成功（防"假完成"）
+                    _rv_ok, _rv_why = _finalize_answer(task, plan, family, _res0, "脚本重放", tracer)
+                    if _rv_ok:
+                        print("[agent] engine-usage: jev=0 qwen=0（脚本重放）")
+                        print("[agent] DONE: %s" % _res0)
+                        tracer.log(1, "done", _res0)
+                        tracer.close()
+                        return 0
+                    # 结果复核未过 → 不认这个答案，降级自由循环重新确认
+                    SCRIPT_BREAK_HINT[0] = (
+                        "（系统）已按「%s」的既定路径跑到一个答案，但**结果复核未通过**（%s）。"
+                        "那个答案是：%s。请从当前屏幕重新确认，给出正确答案；"
+                        "不要直接照抄上面的答案。" % (_sc.get("name"), _rv_why, _res0[:80]))
+                    _ok0, _brk0 = False, len(_sc.get("steps") or [])
+                if _ok0 and not _res0:
+                    print("[agent] 脚本跑完但没产出答案 → 视为失败，降级自由循环")
+                    _ok0, _brk0 = False, 0
+                _steps0 = _sc.get("steps") or []
+                _exp0 = ""
+                if 1 <= _brk0 <= len(_steps0):
+                    _exp0 = json.dumps((_steps0[_brk0 - 1] or {}).get("verify") or {},
+                                       ensure_ascii=False)[:80]
+                print("[agent] 脚本断裂于第 %d 步 → 降级自由循环" % _brk0)
+                tracer.log(0, "result", "脚本断裂于第 %d 步（期望 %s）→ 降级" % (_brk0, _exp0))
+                SCRIPT_BREAK_HINT[0] = (
+                    "（系统）已按「%s」的既定路径尝试过，在第 %d 步失败（期望看到 %s）。"
+                    "请从当前屏幕接管，不要重复脚本已失败的动作。" % (_sc.get("name"), _brk0, _exp0))
+        except Exception as e:
+            print("[agent] 脚本重放异常（跳过）: %r" % (e,))
+
+    # ================================ 关卡二' · 规划骨架确定性执行（三段式核心）
+    #   用户约束（2026-10-12）：模型不常驻、不牺牲速度、每步必须正确。
+    #   故：规划期**一次**产出声明式骨架（按元素名，不写坐标）→ 执行期逐条"解析坐标 +
+    #   执行 + 三级锚点核对"（**0 模型**）→ 某步核对失败 → 交回模型做局部恢复。
+    #   仅在"没命中已固化脚本"时才走这条（已固化脚本是验证过的路径，优先级更高）。
+    if (SW_SKELETON and SL is not None and DISPLAY == 0 and plan and not _sc_hit):
+        try:
+            _sk = SL.compile_plan_steps(plan, plan.get("app_package") or "")
+            if _sk:
+                _sksc = {"id": "plan-skeleton", "app": plan.get("app_package") or "",
+                         "name": (plan.get("intent") or task)[:30], "steps": _sk}
+                print("[agent] 规划骨架 %d 步 → 确定性执行（0 每步模型）" % len(_sk))
+                tracer.log(0, "action", "plan-skeleton: "
+                           + json.dumps(_sk, ensure_ascii=False)[:500])
+                _ok1, _res1, _lg1, _brk1 = replay_script(_sksc, tracer)
+                for _l in _lg1:
+                    print("[skeleton] " + _l)
+                if _ok1 and _res1:
+                    _rv_ok, _rv_why = _finalize_answer(task, plan, family, _res1,
+                                                       "规划骨架", tracer)
+                    if _rv_ok:
+                        print("[agent] engine-usage: jev=0 qwen=0（规划骨架执行）")
+                        print("[agent] DONE: %s" % _res1)
+                        tracer.log(1, "done", _res1)
+                        tracer.close()
+                        return 0
+                    SCRIPT_BREAK_HINT[0] = (
+                        "（系统）已按规划骨架跑到一个答案，但**结果复核未通过**（%s）。"
+                        "那个答案是：%s。请从当前屏幕重新确认并给出正确答案。"
+                        % (_rv_why, _res1[:80]))
+                else:
+                    _steps1 = _sk
+                    _exp1 = ""
+                    if 1 <= _brk1 <= len(_steps1):
+                        _exp1 = json.dumps((_steps1[_brk1 - 1] or {}).get("verify") or {},
+                                           ensure_ascii=False)[:80]
+                    print("[agent] 规划骨架断裂于第 %d 步 → 交回模型恢复" % _brk1)
+                    tracer.log(0, "result", "骨架断裂于第 %d 步（期望 %s）→ 交回模型"
+                               % (_brk1, _exp1))
+                    SCRIPT_BREAK_HINT[0] = (
+                        "（系统）已按规划骨架执行到第 %d 步，核对未通过（期望屏幕上出现 %s）。"
+                        "骨架原计划：%s。请从当前屏幕接管，接着往下走；"
+                        "不要重复骨架已经成功的步骤。" % (
+                            _brk1, _exp1,
+                            " → ".join(str((x or {}).get("text") or (x or {}).get("do") or "")
+                                       for x in _sk)[:160]))
+        except Exception as e:
+            print("[agent] 规划骨架执行异常（跳过）: %r" % (e,))
+
+    # ================================ 关卡三 · 子目标状态机
+    goals = []
+    if SW_SUBGOAL and SL is not None:
+        try:
+            goals = SL.build_goals(plan)
+        except Exception:
+            goals = []
+    if goals:
+        print("[agent] 子目标 %d 个: %s" % (len(goals), " → ".join(g["goal"][:18] for g in goals)))
+    goal_idx, goal_miss = 0, 0
+    goal_retry = {}
+    login_strikes, login_alerted = 0, False
+    stall_resets = 0                       # "无进展重置"次数（≥3 → 兜底放弃）
+    _HOME_DONE.clear()
+    DEAD_SPOTS = set()
+    _t_run0 = time.time()                  # 本次任务墙钟起点（用于总时长上限）
+    if SCRIPT_BREAK_HINT[0]:
+        history.append({"role": "user", "content": SCRIPT_BREAK_HINT[0]})
+        SCRIPT_BREAK_HINT[0] = ""
+
     for step in range(1, max_steps + 1):
         t_step = time.time()
+        # —— 总时长上限（2026-10-12：用户口径"不该烧到 60 步"）——
+        #    到点就如实收尾，避免"无限空转"。默认 150 秒（可用 TIME_CAP 覆盖）。
+        if TIME_CAP and (time.time() - _t_run0) > TIME_CAP:
+            _m = "无法完成：已执行 %d 步、耗时 %.0f 秒仍未完成，按超时停止。" % (
+                step - 1, time.time() - _t_run0)
+            print("[agent] 总时长超限 → 停止：%s" % _m)
+            tracer.log(step, "result", "超时停止")
+            print("[agent] DONE: %s" % _m)
+            tracer.log(step, "done", _m)
+            tracer.close()
+            return 0
         state = None
         for attempt in range(3):
             try:
@@ -1423,7 +2576,7 @@ def main():
         pre_elems = None
         if state is None:
             # portal 不可用 → 用 root 桥树顶上（操作侧由 Portal 的桥兜底接续）
-            pre_elems = bridge_elements()
+            pre_elems = bridge_elements(dpy=DISPLAY) if DISPLAY > 0 else bridge_elements()
             if pre_elems:
                 print("[step %d] portal 不可用，转用 root 桥树（%d 元素）" % (step, len(pre_elems)))
                 tracer.log(step, "result", "portal离线→桥树 %d 元素" % len(pre_elems))
@@ -1431,16 +2584,74 @@ def main():
                                          "keyboardVisible": False},
                          "a11y_tree": fake_tree_from_elems(pre_elems)}
             else:
-                print("[agent] portal 连续取状态失败且桥树也不可用，中止。")
-                aborted = True
-                break
+                # 视觉兜底：微信等 App 会让 portal 直接报 "root filtered out"（读不到就抛错）
+                ve = vision_elements(step, tracer)
+                if ve:
+                    print("[step %d] portal 读不到（App 屏蔽）→ 视觉兜底 %d 元素（推定前台=%s）"
+                          % (step, len(ve), _LAST_PKG[0] or "?"))
+                    pre_elems = ve
+                    state = {"phone_state": {"currentApp": "(视觉)", "packageName": _LAST_PKG[0],
+                                             "keyboardVisible": False},
+                             "a11y_tree": fake_tree_from_elems(ve)}
+                else:
+                    print("[agent] portal 连续取状态失败且桥树/视觉都不可用，中止。")
+                    aborted = True
+                    break
         elems = collect_elements(state)
         cur_pkg = ""
         try:
             cur_pkg = (state.get("phone_state") or {}).get("packageName") or ""
         except Exception:
             pass
-        if pre_elems is not None:
+        if cur_pkg and not cur_pkg.startswith("("):
+            _LAST_PKG[0] = cur_pkg
+        # —— 登录提示处理（**不早停**）：先关掉继续用；反复出现才叫人来登录 ——
+        #   2026-10-12 用户口径：很多 App 只是"弹一下"登录，关掉就能继续；一看到就停是错的。
+        if SL is not None and DISPLAY == 0:
+            try:
+                _tp = (plan or {}).get("app_package") or ""
+                if SL.login_wall(elems) and (not _tp or cur_pkg == _tp):
+                    login_strikes += 1
+                    _closed = _dismiss_login(portal, elems, tracer)
+                    print("[step %d] 检测到登录提示（第 %d 次，%s）"
+                          % (step, login_strikes, "已尝试关闭并继续" if _closed else "未找到关闭按钮"))
+                    tracer.log(step, "result", "登录提示 第%d次(%s)"
+                               % (login_strikes, "已关闭" if _closed else "无关闭按钮"))
+                    if login_strikes >= 2 and not login_alerted:
+                        login_alerted = True
+                        alert_user("小工头：需要你登录",
+                                   "%s 反复要求登录，请打开手机登录后再说一次任务。"
+                                   % (cur_pkg or "目标应用"), tracer)
+                    if login_strikes >= 3:
+                        _m = "无法完成：%s 反复要求登录，已提醒你处理" % (cur_pkg or "目标应用")
+                        print("[agent] 登录提示反复出现 → 停并已提醒：%s" % _m)
+                        print("[agent] DONE: %s" % _m)
+                        tracer.log(step, "done", _m)
+                        tracer.close()
+                        return 0
+                    if _closed:
+                        time.sleep(1.0)
+                        continue                    # 关掉后重新感知、继续任务
+                else:
+                    login_strikes = 0
+            except Exception as e:
+                print("[step %d] 登录提示处理异常（跳过）: %r" % (step, e))
+        if DISPLAY > 0:
+            # 正式模式：感知只认影子屏（portal 会跟着"最后被触屏的那块屏"漂移；
+            # 桥树天然含全部显示屏 → 按 displayId 过滤）。
+            # 注意：影子屏空树时**不要**回退用 portal 树——那是主屏的元素，点下去会指错地方。
+            be = bridge_elements(dpy=DISPLAY)
+            if len(be) < 3:
+                print("[step %d] 影子屏桥树仅 %d 个元素（按空屏处理，不回退主屏）" % (step, len(be)))
+                tracer.log(step, "result", "影子屏桥树元素不足: %d" % len(be))
+            elems = be
+            try:
+                fp = display_focus_pkg(DISPLAY)
+                if fp:
+                    cur_pkg = fp
+            except Exception:
+                pass
+        elif pre_elems is not None:
             elems = pre_elems
         else:
             # —— 感知补盲：portal 树元素过少（内容区被标记"不重要"被过滤）→ 用 root 桥完整树 ——
@@ -1451,15 +2662,60 @@ def main():
                           % (step, len(elems), len(extra)))
                     tracer.log(step, "result", "感知补盲 %d->%d 元素" % (len(elems), len(extra)))
                     elems = extra
-        # —— 经验坐标注入：App 卡片实测坐标（如微博「更多热搜」「热搜」标签）→ 虚拟元素（Jev/qwen 可直接点） ——
+        # —— 视觉兜底：a11y 树被 App 屏蔽（微信 8.0.52+：根被过滤，树里只剩状态栏）
+        #    → 截图 + 多模态模型 → 伪元素清单（下游零改动）；上游已用视觉的步不再重复调用 ——
+        if DISPLAY == 0 and pre_elems is None and cur_pkg in vision_apps():
+            ve = vision_elements(step, tracer)
+            if ve:
+                elems = ve
+            elif elems:
+                print("[step %d] 视觉兜底失败，回退元素树（%d 元素，可能只剩状态栏）"
+                      % (step, len(elems)))
+        # —— 关卡一 · 起点归位：目标 App 在前台但不在已知页（或落在死胡同页）→ 先返航 ——
         try:
-            for _sp in app_coords(cur_pkg, elems):
+            if cur_pkg and not cur_pkg.startswith("("):
+                if _maybe_home_reset(cur_pkg, elems, portal, tracer, _HOME_DONE, fg_pkg=cur_pkg):
+                    _el3, _c3 = _script_elems(portal)
+                    if _el3:
+                        elems = _el3
+        except Exception as e:
+            print("[step %d] 起点归位异常（跳过）: %r" % (step, e))
+        # —— 页面身份（三级锚点）：坐标注入按页面过滤 ——
+        cur_page = ""
+        try:
+            cur_page = page_of(cur_pkg, elems)
+            if cur_page:
+                tracer.log(step, "result", "页面身份: %s" % cur_page)
+        except Exception:
+            cur_page = ""
+        # —— 经验坐标注入：App 卡片实测坐标（如微博「更多热搜」「热搜」标签）→ 虚拟元素（Jev/qwen 可直接点） ——
+        #    2026-10-11：页面过滤 + 坐标自校验 + 本次失效名单
+        virt_injected = []
+        try:
+            for _sp in app_coords(cur_pkg, elems, cur_page, DEAD_SPOTS):
+                virt_injected.append(_sp)
                 elems.append((len(elems), _sp["x"], _sp["y"],
                               "%s【经验坐标】" % _sp["label"], True))
                 print("[step %d] 经验坐标注入: %s (%d,%d)"
                       % (step, _sp["label"], _sp["x"], _sp["y"]))
                 tracer.log(step, "result", "经验坐标注入: %s (%d,%d)"
                            % (_sp["label"], _sp["x"], _sp["y"]))
+        except Exception:
+            pass
+        # —— 坐标封禁：同一坐标**累计**点击 ≥4 次（不管屏幕变不变）→ 从元素清单里剔除 ——
+        #    2026-10-12 实证：今日头条/抖音里模型反复点同一个无效坐标，靠"屏幕无变化"判不出来
+        #    （信息流一直在刷新，屏幕 hash 一直在变），最终烧光步数。
+        try:
+            _bad = [k for k, n in tap_seen.items() if n >= 4]
+            if _bad:
+                _b4 = len(elems)
+                elems = [e for e in elems
+                         if not any(abs(e[1] - kx * 8) < 60 and abs(e[2] - ky * 8) < 60
+                                    for (kx, ky) in _bad)]
+                if len(elems) != _b4:
+                    print("[step %d] 坐标封禁：剔除 %d 个元素（这些坐标已多次无效）"
+                          % (step, _b4 - len(elems)))
+                    tracer.log(step, "result", "坐标封禁剔除 %d 个元素" % (_b4 - len(elems)))
         except Exception:
             pass
         # —— 榜单跨步累积：把本屏可见的「标题+热度」并入累积器（滚动收集"第N条"类任务用） ——
@@ -1482,6 +2738,16 @@ def main():
                     note += ("该操作已连续 %d 次无效果，请不要再重复，换一种做法。"
                              % no_effect[last_sig])
                     tracer.log(step, "result", "无效操作标记: %s" % (last_sig,))
+                    # 经验坐标失效标记：来自卡片的虚拟元素点了没反应 → 本次运行内不再注入
+                    try:
+                        if SL is not None and last_pick and "【经验坐标】" in last_pick and cur_pkg:
+                            _k = SL.spot_key(cur_pkg, last_pick.replace("【经验坐标】", ""))
+                            if _k not in DEAD_SPOTS:
+                                DEAD_SPOTS.add(_k)
+                                print("[step %d] 经验坐标失效标记: %s" % (step, _k))
+                                tracer.log(step, "result", "经验坐标失效: %s" % _k)
+                    except Exception:
+                        pass
                 history.append({"role": "user", "content": note})
             elif changed:
                 no_effect.clear()   # 屏幕已变化（加载完成/页面切换）→ 解除全部"无效"标记
@@ -1538,9 +2804,51 @@ def main():
                                     "说明「无法完成：需要先登录」。"})
             except Exception:
                 pass
+        # —— 关卡三 · 子目标：先验收已完成的目标，再注入「当前子目标」（2026-10-11） ——
+        goal_text = ""
+        if goals and SL is not None:
+            try:
+                while goal_idx < len(goals):
+                    _gr = SL.goal_reached(goals, goal_idx, elems, "", None)
+                    if _gr is None:          # 该目标没锚点 → 无法验收，视为进行中
+                        break
+                    if not _gr:
+                        break
+                    print("[step %d] 子目标达成：%s" % (step, goals[goal_idx]["goal"][:24]))
+                    tracer.log(step, "result", "子目标达成: %s" % goals[goal_idx]["goal"][:24])
+                    _nxt = ("接下来做：「%s」" % goals[goal_idx + 1]["goal"]) \
+                        if goal_idx + 1 < len(goals) else "全部子目标已完成，请 done 收尾并给出答案。"
+                    history.append({"role": "user", "content":
+                                    "（系统）✅ 已完成子目标「%s」。%s"
+                                    % (goals[goal_idx]["goal"], _nxt)})
+                    goal_idx += 1
+                    goal_miss = 0
+                    prog.score = 0
+                if goal_idx < len(goals):
+                    goal_text = render_goals(goals, goal_idx)
+                    goal_miss += 1
+                    if goal_miss >= 3 and goal_idx not in goal_hinted:
+                        # ⚠️ 只做**软提示**，绝不判失败、不干净停（2026-10-12 实证）：
+                        #    子目标的 verify 是规划器猜的特征词，经常不准；硬判"未达成 → 回退
+                        #    → 重试 3 次 → 干净停"会把**本来能完成**的任务当场判死。
+                        #    且**同一目标只提示一次**（每 3 步刷一次会持续干扰模型）。
+                        #    真正的"卡住"由 Progress 无进展分 / 硬阻断 / 坐标封禁负责。
+                        goal_miss = 0
+                        goal_hinted.add(goal_idx)
+                        _fb = goals[goal_idx].get("fallback") or ""
+                        print("[step %d] 子目标未达成 → 软提示（仅一次，不判失败）：%s"
+                              % (step, goals[goal_idx]["goal"][:20]))
+                        history.append({"role": "user", "content":
+                                        "（系统提示）你可能还没到「%s」。若你其实已在该页面，"
+                                        "**请忽略本提示**，继续按当前屏幕推进；"
+                                        "若确实没到，可尝试：%s"
+                                        % (goals[goal_idx]["goal"], _fb or "换个入口 / 点对应导航")})
+            except Exception as e:
+                print("[step %d] 子目标处理异常（跳过）: %r" % (step, e))
+                goal_text = ""
         try:
             act, eng, dec_dt, ti = decide(step, task, state, history, engine_now, elems,
-                                          experience, related_apps, plan)
+                                          experience, related_apps, plan, goal_text)
         except Exception as e:
             print("[step %d] decide error: %r" % (step, e))
             time.sleep(2)
@@ -1586,6 +2894,47 @@ def main():
                 except Exception as e:
                     if not summary:
                         summary = "(总结生成失败: %r)" % e
+            # —— 系统真值交叉核对（0 模型）：WiFi/电量这类能用系统 API 直读的，优先信系统 ——
+            if summary and not summary.startswith("无法") and not sys_locked:
+                try:
+                    _tr = _sys_truth(task)
+                    _bad = ""
+                    if _tr.get("wifi") and _tr["wifi"] not in summary:
+                        _bad = "系统实测当前 WiFi 是「%s」，你的答案里没有它" % _tr["wifi"]
+                    elif _tr.get("battery") and _tr["battery"] not in summary:
+                        _bad = "系统实测电量是 %s%%，你的答案里没有它" % _tr["battery"]
+                    if _bad:
+                        done_rejects += 1
+                        print("[step %d] DONE 被系统真值驳回：%s" % (step, _bad))
+                        tracer.log(step, "result", "done被系统真值驳回: %s" % _bad)
+                        history.append({"role": "assistant",
+                                        "content": json.dumps(act, ensure_ascii=False)})
+                        history.append({"role": "user", "content":
+                                        "系统交叉核对发现你的答案与手机实际状态不符：%s。"
+                                        "请以系统实测为准重新作答。" % _bad})
+                        time.sleep(1.0)
+                        continue
+                except Exception as e:
+                    print("[step %d] 系统真值核对异常（跳过）: %r" % (step, e))
+            # —— 本地规则复核（0 模型，先行）：规则能确定的直接驳回，省一次模型调用 ——
+            if summary and not summary.startswith("无法") and not sys_locked and SW_REVIEW \
+                    and SL is not None:
+                try:
+                    _r_ok, _r_why = SL.review_answer(task, summary, plan, family)
+                except Exception:
+                    _r_ok, _r_why = True, ""
+                if not _r_ok:
+                    done_rejects += 1
+                    print("[step %d] DONE 被本地规则驳回：%s" % (step, _r_why))
+                    tracer.log(step, "result", "done被本地规则驳回: %s" % _r_why)
+                    history.append({"role": "assistant",
+                                    "content": json.dumps(act, ensure_ascii=False)})
+                    history.append({"role": "user", "content":
+                                    "你的答案被系统**本地规则**驳回：%s。"
+                                    "请重新核对屏幕上的真实内容再作答；若确实无法完成，"
+                                    "请输出 done 并如实说明「无法完成：原因」。" % _r_why})
+                    time.sleep(1.0)
+                    continue
             # —— 防幻觉复核：结果须能在屏幕上找到依据（"无法完成"如实报告的直接放行） ——
             screen_text = " ".join(e[3] for e in elems)
             if (summary and done_rejects < 2 and len(screen_text) >= 30
@@ -1622,7 +2971,34 @@ def main():
                         learn_app_hint(task, exec_log, state, apps)
                     except Exception:
                         pass
+                    # —— 关卡二 · 成功即固化（候选脚本；跑通两次才转正）——
+                    if SW_SCRIPT and SL is not None and DISPLAY == 0:
+                        try:
+                            _cand = SL.save_candidate(
+                                task, plan, exec_log, family, cur_pkg,
+                                done_rejects=done_rejects,
+                                max_block_streak=max_block_streak)
+                            if _cand:
+                                print("[agent] 脚本候选已固化: %s（%d 步）→ %s"
+                                      % (_cand.get("name"), len(_cand.get("steps") or []),
+                                         "~/bridge/skills/scripts/%s.json" % _cand.get("id")))
+                                tracer.log(step, "result", "脚本候选固化: %s" % _cand.get("id"))
+                        except Exception as e:
+                            print("[agent] 脚本固化失败（忽略）: %r" % (e,))
             return 0
+
+        # —— pick 解析（**准确率关键**）：模型只说"第几号元素"，坐标由本地精确给出 ——
+        #    2026-10-12：让模型抄坐标 / 猜元素名是最大的错误来源；改成"报编号"后，
+        #    点错、名字对不上这两类失败从根上消失。
+        if a == "tap":
+            _rp = resolve_pick(elems, act.get("pick"))
+            if _rp:
+                act["x"], act["y"] = _rp[0], _rp[1]
+                act["_pick_label"] = _rp[2]
+            else:
+                _rp2 = label_at(elems, act.get("x", -1), act.get("y", -1))
+                if _rp2:
+                    act["_pick_label"] = _rp2
 
         # —— 重复失败/无效动作硬阻断（连续失败 ≥2 或连续无效果 ≥2 → 拒绝执行，逼模型换策略） ——
         sig = Progress.sig_of(act)
@@ -1641,11 +3017,38 @@ def main():
             last_sw_sig, sw_repeat = None, 0
         sw_blocked = sw_sig is not None and sw_repeat >= 7
         _fail_lim = 3 if (sig is not None and sig[0] == "open_app") else 2
+        # —— 贯穿件 B · 硬闸门（执行前；来自 guards.json，高频错误模式编译而成）——
+        guard_blocked, guard_msg = False, ""
+        if SW_GUARDS and SL is not None:
+            try:
+                _lbl = ""
+                if a == "tap":
+                    _lbl = str(act.get("_pick_label")
+                               or label_at(elems, act.get("x", -1), act.get("y", -1)) or "")
+                guard_blocked, guard_msg = SL.guard_check(
+                    act, {"pkg": cur_pkg, "page": cur_page, "label": _lbl})
+            except Exception:
+                guard_blocked = False
+        # 坐标封禁（硬拦截）：同一坐标本次运行内累计点 ≥4 次仍无进展 → 直接拒绝
+        #   2026-10-12 实证：模型会从对话历史里**照抄自己之前的动作**，即使该坐标已从
+        #   元素清单里被剔除也会再点 → 光"过滤元素"不够，必须在执行层直接拦下。
+        coord_banned = (sig is not None and sig[0] == "tap" and tap_seen.get(sig, 0) >= 4)
         blocked = (sig is not None and (fail_counts.get(sig, 0) >= _fail_lim
-                                        or no_effect.get(sig, 0) >= 2)) or sw_blocked
+                                        or no_effect.get(sig, 0) >= 2)) \
+            or sw_blocked or guard_blocked or coord_banned
         if blocked:
             ok = False
-            if sw_blocked:
+            if coord_banned:
+                exec_err = ("该坐标 (%d,%d) 本次已点 %d 次仍无进展，已封禁；"
+                            "请改点别的元素 / 换一种做法（换入口、滚动、换页签）"
+                            % (sig[1] * 8, sig[2] * 8, tap_seen[sig]))
+                print("[step %d] 坐标封禁拦截: %s" % (step, exec_err[:70]))
+                tracer.log(step, "result", "坐标封禁拦截: %s" % exec_err[:90])
+            elif guard_blocked:
+                exec_err = guard_msg or "硬闸门拦截"
+                print("[step %d] GUARD 拦截: %s" % (step, exec_err[:70]))
+                tracer.log(step, "result", "硬闸门拦截: %s" % exec_err[:90])
+            elif sw_blocked:
                 exec_err = "相同滑动已连续 %d 次未到达目标" % sw_repeat
                 print("[step %d] BLOCK 滑动迷路: %s" % (step, sw_sig))
             else:
@@ -1654,26 +3057,52 @@ def main():
         else:
             try:
                 if a == "tap":
-                    tgt = act.get("pick") or label_at(elems, act.get("x", -1), act.get("y", -1))
+                    tgt = act.get("_pick_label") or label_at(elems, act.get("x", -1),
+                                                             act.get("y", -1))
                     if tgt and any(w in tgt for w in DANGER_WORDS):
                         ok = False
                         exec_err = ("安全护栏：不执行「%s」类操作（agent 不处理登录/验证码凭证）" % tgt)
                         print("[step %d] 护栏拦截: %s" % (step, tgt))
                         tracer.log(step, "result", "护栏拦截: %s" % tgt)
+                    elif act.get("pick") and "_pick_label" not in act:
+                        ok = False
+                        exec_err = ("pick「%s」在元素清单里找不到（编号越界或文本不存在）；"
+                                    "请改用清单里真实存在的编号" % act.get("pick"))
+                        print("[step %d] pick 无效: %s" % (step, exec_err[:70]))
+                    elif "x" not in act or "y" not in act:
+                        ok = False
+                        exec_err = "tap 既没有有效 pick，也没有坐标"
+                    elif DISPLAY > 0:
+                        input_cmd(["-d", DISPLAY, "tap", act["x"], act["y"]])
                     else:
                         portal.tap(act["x"], act["y"])
                 elif a == "swipe":
-                    portal.swipe(act.get("x1", 0), act.get("y1", 0), act.get("x2", 0),
-                                 act.get("y2", 0), act.get("duration", 500))
-                elif a == "scroll":
-                    if (act.get("direction") or "down").lower() == "up":
-                        portal.swipe(540, 700, 540, 1700, 500)
+                    if DISPLAY > 0:
+                        input_cmd(["-d", DISPLAY, "swipe", act.get("x1", 0), act.get("y1", 0),
+                                   act.get("x2", 0), act.get("y2", 0), act.get("duration", 500)])
                     else:
-                        portal.swipe(540, 1700, 540, 700, 500)
+                        portal.swipe(act.get("x1", 0), act.get("y1", 0), act.get("x2", 0),
+                                     act.get("y2", 0), act.get("duration", 500))
+                elif a == "scroll":
+                    _up = (act.get("direction") or "down").lower() == "up"
+                    _p = (540, 700, 540, 1700, 500) if _up else (540, 1700, 540, 700, 500)
+                    if DISPLAY > 0:
+                        input_cmd(["-d", DISPLAY, "swipe"] + list(_p))
+                    else:
+                        portal.swipe(*_p)
                 elif a == "input_text":
-                    portal.input_text(act.get("text", ""), act.get("clear", False))
+                    if DISPLAY > 0:
+                        try:
+                            portal.input_text(act.get("text", ""), act.get("clear", False))
+                        except Exception:
+                            input_cmd(["-d", DISPLAY, "text", str(act.get("text", ""))])
+                    else:
+                        portal.input_text(act.get("text", ""), act.get("clear", False))
                 elif a == "key":
-                    portal.key(act.get("key_code", 4))
+                    if DISPLAY > 0:
+                        input_cmd(["-d", DISPLAY, "keyevent", act.get("key_code", 4)])
+                    else:
+                        portal.key(act.get("key_code", 4))
                 elif a == "open_app":
                     want = act.get("package", "")
                     real = resolve_package(want, apps)
@@ -1690,8 +3119,17 @@ def main():
                             print("[step %d] open_app 包名矫正: %s -> %s" % (step, want, real))
                             tracer.log(step, "result", "包名矫正: %s -> %s" % (want, real))
                             act["package"] = real
-                        portal.open_app(real or want)
-                        time.sleep(3.0)   # App 冷启动等待（大 App 被系统清理后重启需数秒）
+                        if DISPLAY > 0:
+                            _err = shadow_open_app(real or want, DISPLAY)
+                            if _err:
+                                ok = False
+                                exec_err = "影子屏启动失败：%s" % _err
+                            else:
+                                time.sleep(3.0)
+                        else:
+                            portal.open_app(real or want)
+                            _LAST_PKG[0] = real or want
+                            time.sleep(3.0)   # App 冷启动等待（大 App 被系统清理后重启需数秒）
                 elif a == "wait":
                     time.sleep(act.get("seconds", 1.5))
                 else:
@@ -1709,6 +3147,26 @@ def main():
                 fail_counts[sig] = fail_counts.get(sig, 0) + 1
         # 记录本步，供下一步"效果补记"（屏幕变化对比）
         last_sig, last_ok, last_hash = sig, ok, screen_hash
+        last_pick = str(act.get("pick") or "")
+        # tap 坐标累计计数（≥4 次封禁；不依赖屏幕是否变化）
+        if sig is not None and sig[0] == "tap":
+            tap_seen[sig] = tap_seen.get(sig, 0) + 1
+            # qwen 的 tap 没有 pick 字段 → 用"本步注入的虚拟坐标"反查，供失效标记使用
+            if not last_pick:
+                for _v in virt_injected:
+                    if abs(_v["x"] - sig[1] * 8) < 40 and abs(_v["y"] - sig[2] * 8) < 40:
+                        last_pick = _v["label"] + "【经验坐标】"
+                        break
+        # 统计（供失败归类 / 脚本固化）
+        if elems:
+            min_elems_seen = min(min_elems_seen, len(elems))
+        if not ok and exec_err:
+            errs.append(exec_err)
+        try:
+            if cur_pkg and (app_cards().get(cur_pkg) or {}).get("pages") and not cur_page:
+                anchor_miss += 1
+        except Exception:
+            pass
         # 迷路检测：连续滚动/滑动计数（滚动会改变屏幕哈希，不会触发常规"无进展"）
         if a in ("scroll", "swipe"):
             scroll_streak += 1
@@ -1721,11 +3179,19 @@ def main():
         history.append({"role": "assistant", "content": json.dumps(act, ensure_ascii=False)})
         if blocked:
             block_streak += 1
+            if block_streak > max_block_streak:
+                max_block_streak = block_streak
             extra = ""
             if related_apps and a == "open_app":
                 extra = " 本机可用的相关应用：" + "、".join(
                     "%s(%s)" % (ra["label"], ra["package"]) for ra in related_apps) + "。"
-            if sw_blocked:
+            if coord_banned:
+                msg = ("上一步没有执行（坐标已封禁）：%s。**不要再点这个位置**，"
+                       "请从屏幕元素清单里换一个元素，或改用滚动/切换页签/换入口。"
+                       % (exec_err or ""))
+            elif guard_blocked:
+                msg = ("上一步没有执行（硬闸门拦截）：%s 请换一种做法。" % (exec_err or ""))
+            elif sw_blocked:
                 msg = ("上一步没有执行：相同的滑动已连续 %d 次，屏幕仍未到达目标。"
                        "请停止滑动，改用其他方法（按返回键、点击页面导航/按钮、换入口或换 App）。"
                        % sw_repeat)
@@ -1772,8 +3238,26 @@ def main():
             # 已在 qwen 且再次连续无进展 → 迷路重置提示（防"原地打转"，2026-09-24 新增）
             prog.score = 0
             scroll_streak = 0
-            print("[step %d] [reset] 连续无进展（%s）→ 注入迷路重置提示" %
-                  (step, ",".join(flags) if flags else "-"))
+            # **兜底放弃**（2026-10-12 用户口径：不该烧到 60 步才停）：重置 3 次仍无进展
+            # → 判定"这条路走不通"，如实收尾，不再空转。
+            stall_resets += 1
+            if stall_resets >= 3:
+                _m = ("无法完成：已尝试 %d 步仍无进展（%s），判断这条路走不通，已停止。"
+                      % (step, ",".join(flags) if flags else "重复动作/屏幕无变化"))
+                print("[agent] 无进展兜底放弃：%s" % _m)
+                tracer.log(step, "result", "无进展放弃(stall=%d)" % stall_resets)
+                print("[agent] DONE: %s" % _m)
+                tracer.log(step, "done", _m)
+                tracer.close()
+                if exec_log:
+                    try:
+                        save_failure(task, "无进展兜底放弃", exec_log,
+                                     _stage="步进", _pattern="no_progress")
+                    except Exception:
+                        pass
+                return 0
+            print("[step %d] [reset] 连续无进展（%s）→ 注入迷路重置提示（第 %d/3 次）" %
+                  (step, ",".join(flags) if flags else "-", stall_resets))
             tracer.log(step, "result", "迷路重置提示: %s" % (",".join(flags) if flags else "-"))
             history.append({"role": "user", "content":
                             "（系统警告）你已连续多步没有进展（%s）。立即改变做法："
@@ -1792,8 +3276,31 @@ def main():
         fail_reason = "步数用尽（%d 步未完成）" % max_steps
         print("[agent] max steps (%d) reached, no done." % max_steps)
     if exec_log:
-        save_failure(task, fail_reason, exec_log)
-        print("[agent] 失败教训已记录: %d 步 → ~/bridge/skills/failures.json" % len(exec_log))
+        _stage, _pattern, _evidence = "", "", ""
+        if SL is not None:
+            try:
+                _open_fail = sum(1 for s in exec_log
+                                 if str(s).startswith("open_app") and str(s).endswith("（失败）"))
+                _stage, _pattern = SL.classify_failure({
+                    "min_elems": min_elems_seen,
+                    "plan_pkg": (plan or {}).get("app_package") or "",
+                    "no_plan_app": bool(plan) and not (plan or {}).get("app_package"),
+                    "max_block_streak": max_block_streak,
+                    "open_app_fail": _open_fail,
+                    "done_rejects": done_rejects,
+                    "anchor_miss": anchor_miss,
+                    "errs": errs,
+                    "last_err": errs[-1] if errs else "",
+                })
+                _evidence = "|".join(errs[-3:])[:160]
+            except Exception as e:
+                print("[agent] 失败归类异常（忽略）: %r" % (e,))
+        save_failure(task, fail_reason, exec_log, _stage, _pattern, _evidence)
+        print("[agent] 失败教训已记录: %d 步（stage=%s pattern=%s）→ ~/bridge/skills/failures.json"
+              % (len(exec_log), _stage or "-", _pattern or "-"))
+        # 失败交还：把"卡在哪一关"明确报出来（控制台/对话页据此展示"重试 / 交给用户"）
+        print("[agent] 卡点: stage=%s | pattern=%s | 步数=%d/%d"
+              % (_stage or "未知", _pattern or "-", len(exec_log), max_steps))
     tracer.close()
     return 2
 

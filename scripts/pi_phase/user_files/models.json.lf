@@ -1,0 +1,36 @@
+{
+  "providers": {
+    "dgx": {
+      "name": "dgx",
+      "baseUrl": "http://192.168.3.75:8888/v1",
+      "api": "openai-completions",
+      "apiKey": "123",
+      "models": [
+        {
+          "id": "qwen3.8-flash-next",
+          "name": "qwen3.8-flash-next",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 262144,
+          "maxTokens": 32768
+        }
+      ]
+    },
+    "hdd": {
+      "name": "hdd",
+      "baseUrl": "https://ai.hdd.sb/v1",
+      "api": "openai-completions",
+      "apiKey": "sk-hQb7ceE8x6FyF0QdWZmhpspFAo4mgwuf792k6uoSvcWYZx3U",
+      "models": [
+        {
+          "id": "gpt-5.6-luna",
+          "name": "gpt-5.6-luna",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 262144,
+          "maxTokens": 32768
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,193 @@
+{
+ "com.coloros.alarmclock": {
+  "version": 3,
+  "home_path": {
+   "until": [
+    "闹钟",
+    "世界时钟"
+   ],
+   "tap_home_tab": [
+    162,
+    2268
+   ]
+  },
+  "pages": [
+   {
+    "name": "闹钟页",
+    "verify": [
+     "闹钟",
+     "世界时钟"
+    ]
+   }
+  ]
+ },
+ "com.coloros.calendar": "{'version': 3, 'home_path': {'until': ['今天', '农历']}, 'pages': [{'name': '月视图', 'verify': ['今天', '农历']}]} 启动应用后默认展示今日日程视图，无需额外操作 日历App主界面为月视图，点击日期可展开查看当日详细日程安排。",
+ "com.coloros.weather2": "{'version': 3, 'home_path': {'until': ['℃']}, 'pages': [{'name': '天气首页', 'verify': ['℃', '城市管理']}]} 天气详情页入口位于底部导航栏左侧第一个图标",
+ "com.microsoft.emmx": "在Edge浏览器中，点击底部地址栏输入网址或搜索关键词。",
+ "com.tencent.news": "首页信息流支持上下滑动浏览，弹窗需点击同意或先不了 首页默认展示头条新闻列表，直接浏览即可 腾讯新闻App首页默认展示头条新闻列表 首页信息流位于顶部，点击新闻卡片即可进入详情页",
+ "com.ss.android.article.news": {
+  "version": 3,
+  "home_path": {
+   "until": [
+    "首页",
+    "商城",
+    "我的"
+   ],
+   "tap_home_tab": [
+    108,
+    2320
+   ]
+  },
+  "pages": [
+   {
+    "name": "首页信息流",
+    "verify": [
+     "首页",
+     "商城",
+     "我的"
+    ]
+   }
+  ],
+  "spots": [
+   {
+    "label": "热榜频道",
+    "x": 250,
+    "y": 313,
+    "whens": [
+     "推荐",
+     "热榜"
+    ],
+    "page": "首页信息流"
+   }
+  ]
+ },
+ "com.xiaogongtou.entry": "App启动后需等待页面加载完成再进行操作",
+ "com.heytap.music": "底部导航栏包含首页、发现、我的等核心入口",
+ "com.coloros.phonemanager": "手机管家首页顶部区域直接显示当前电量百分比",
+ "com.sina.weibo": {
+  "version": 3,
+  "home_path": {
+   "until": [
+    "发现",
+    "微博热搜"
+   ],
+   "tap_home_tab": [
+    540,
+    2277
+   ]
+  },
+  "pages": [
+   {
+    "name": "发现页",
+    "verify": [
+     "微博热搜",
+     "关注"
+    ]
+   },
+   {
+    "name": "热搜雷达页",
+    "verify": [
+     "热搜雷达"
+    ]
+   },
+   {
+    "name": "热搜榜",
+    "verify": [
+     "实时热点"
+    ]
+   },
+   {
+    "name": "搜索页",
+    "verify": [
+     "搜索微博",
+     "取消"
+    ],
+    "dead_end": true
+   }
+  ],
+  "spots": [
+   {
+    "label": "更多热搜",
+    "x": 907,
+    "y": 846,
+    "whens": [
+     "微博热搜"
+    ],
+    "page": "发现页"
+   },
+   {
+    "label": "热搜",
+    "x": 267,
+    "y": 624,
+    "whens": [
+     "热搜雷达"
+    ],
+    "page": "热搜雷达页"
+   }
+  ]
+ },
+ "com.aiyu.kaipanla": {
+  "version": 3,
+  "home_path": {
+   "until": [
+    "实时龙虎榜",
+    "题材库"
+   ],
+   "tap_home_tab": [
+    105,
+    2281
+   ]
+  },
+  "pages": [
+   {
+    "name": "首页",
+    "verify": [
+     "实时龙虎榜",
+     "题材库",
+     "复盘啦",
+     "市场情绪"
+    ]
+   },
+   {
+    "name": "市场情绪页",
+    "verify": [
+     "涨跌统计",
+     "实际涨停"
+    ]
+   },
+   {
+    "name": "龙虎榜页",
+    "verify": [
+     "上榜",
+     "龙虎榜"
+    ]
+   }
+  ],
+  "spots": [
+   {
+    "label": "市场情绪",
+    "x": 405,
+    "y": 342,
+    "whens": [
+     "实时龙虎榜",
+     "题材库"
+    ],
+    "page": "首页"
+   },
+   {
+    "label": "龙虎榜",
+    "x": 740,
+    "y": 2281,
+    "whens": [
+     "自选股",
+     "龙虎榜",
+     "行情"
+    ],
+    "page": "首页"
+   }
+  ]
+ },
+ "com.android.settings": "{'version': 3, 'pages': [{'name': '设置首页', 'verify': ['WLAN', '连接与共享', '显示与亮度']}, {'name': '电池页', 'verify': ['耗电', '电池用量']}], 'home_path': {'until': ['WLAN', '连接与共享']}} 设置首页需下滑查找，电池信息位于列表下方",
+ "tv.danmaku.bili": "底部导航栏中间为热门入口，点击可浏览热门榜单 底部导航栏第四个为热门，点击可进入热门榜单 首页热门榜单位于顶部，需多次向上滑动屏幕以浏览完整列表。 B站首页需下滑刷新，热门榜入口位于顶部导航栏。",
+ "com.coloros.note": "笔记列表位于屏幕上方，点击首条即可查看详情"
+}

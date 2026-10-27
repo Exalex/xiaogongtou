@@ -1,0 +1,46 @@
+{
+ "id": "weather_now",
+ "name": "天气当前温度",
+ "family": "read",
+ "match": [
+  "天气",
+  "温度",
+  "气温"
+ ],
+ "app": "com.coloros.weather2",
+ "home_path": {
+  "back": 1,
+  "until": [
+   "℃"
+  ],
+  "max_back": 2
+ },
+ "steps": [
+  {
+   "do": "open_app",
+   "verify": {
+    "text": [
+     "℃",
+     "城市管理"
+    ]
+   }
+  },
+  {
+   "do": "extract_text",
+   "text": "℃",
+   "done": true
+  }
+ ],
+ "status": "candidate",
+ "runs": 0,
+ "ok": 0,
+ "device": "LE2110/1080x2400",
+ "created": 1760000000,
+ "last_run": 0,
+ "note": "手工种子（来源：2026-10-11 真机探测 天气首页 20℃,晴 元素）",
+ "not_match": [
+  "明天",
+  "昨天",
+  "后天"
+ ]
+}

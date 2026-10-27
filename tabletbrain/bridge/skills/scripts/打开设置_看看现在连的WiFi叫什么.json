@@ -1,0 +1,28 @@
+{
+ "id": "打开设置_看看现在连的WiFi叫什么",
+ "name": "打开设置，看看现在连的WiFi叫什么",
+ "family": "read",
+ "match": [
+  "看看"
+ ],
+ "app": "com.oplus.wirelesssettings",
+ "steps": [
+  {
+   "do": "swipe"
+  },
+  {
+   "do": "tap",
+   "xy": [
+    307,
+    806
+   ]
+  }
+ ],
+ "status": "draft",
+ "runs": 0,
+ "ok": 0,
+ "created": 1791778440,
+ "last_run": 0,
+ "source_task": "打开设置，看看现在连的WiFi叫什么",
+ "note": "自动固化（draft）：轨迹里没有产出答案的步骤；人工补一个 extract_text/extract_rank 后把 status 改成 candidate 才会生效"
+}

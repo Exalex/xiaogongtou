@@ -1,0 +1,239 @@
+{
+ "package": "com.aiyu.kaipanla",
+ "pages": [
+  {
+   "sig": "kaipanla|MainActivity|38ffefeb",
+   "activity": "com.aiyu.kaipanla.newindex.ui.main.MainActivity",
+   "tag": "home",
+   "elems": 64,
+   "labels": [
+    "16:08",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|UserInfoActivity|3dddcd0b",
+   "activity": "com.aiyu.kaipanla.newindex.user.activity.UserInfoActivity",
+   "tag": "我的",
+   "elems": 57,
+   "labels": [
+    "16:09",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|SearchActivity|5eec465e",
+   "activity": "com.aiyu.kaipanla.newindex.search.ui.activity.SearchActivity",
+   "tag": "股票搜索",
+   "elems": 74,
+   "labels": [
+    "16:09",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|ArticleDetailActivit|23651f88",
+   "activity": "com.aiyu.kaipanla.discovery.ui.activity.ArticleDetailActivity",
+   "tag": "6ab252dbcc09b",
+   "elems": 29,
+   "labels": [
+    "16:09",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|MainActivity|7edf6a66",
+   "activity": "com.aiyu.kaipanla.newindex.ui.main.MainActivity",
+   "tag": "行情\nMarkets",
+   "elems": 72,
+   "labels": [
+    "16:09",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|MainActivity|261b144c",
+   "activity": "com.aiyu.kaipanla.newindex.ui.main.MainActivity",
+   "tag": "龙虎榜",
+   "elems": 64,
+   "labels": [
+    "16:10",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  },
+  {
+   "sig": "kaipanla|SplashActivity|32979b59",
+   "activity": ".splash.SplashActivity",
+   "tag": "6ab25d1ec5dc1",
+   "elems": 31,
+   "labels": [
+    "16:11",
+    "小象超市通知：",
+    "微博通知：",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "大众点评通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "音乐通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。"
+   ]
+  }
+ ],
+ "edges": [
+  {
+   "from": "kaipanla|MainActivity|38ffefeb",
+   "label": "我的",
+   "to": "kaipanla|UserInfoActivity|3dddcd0b"
+  },
+  {
+   "from": "kaipanla|MainActivity|38ffefeb",
+   "label": "首页",
+   "to": "kaipanla|MainActivity|38ffefeb"
+  },
+  {
+   "from": "kaipanla|MainActivity|38ffefeb",
+   "label": "股票搜索",
+   "to": "kaipanla|SearchActivity|5eec465e"
+  },
+  {
+   "from": "kaipanla|MainActivity|38ffefeb",
+   "label": "6ab252dbcc09b",
+   "to": "kaipanla|ArticleDetailActivit|23651f88"
+  },
+  {
+   "from": "kaipanla|MainActivity|38ffefeb",
+   "label": "首页\nHome",
+   "to": "kaipanla|MainActivity|38ffefeb"
+  },
+  {
+   "from": "kaipanla|MainActivity|38ffefeb",
+   "label": "行情\nMarkets",
+   "to": "kaipanla|MainActivity|7edf6a66"
+  },
+  {
+   "from": "kaipanla|MainActivity|261b144c",
+   "label": "我的",
+   "to": "kaipanla|UserInfoActivity|3dddcd0b"
+  },
+  {
+   "from": "kaipanla|MainActivity|261b144c",
+   "label": "首页",
+   "to": "kaipanla|MainActivity|38ffefeb"
+  },
+  {
+   "from": "kaipanla|MainActivity|261b144c",
+   "label": "股票搜索",
+   "to": "kaipanla|SearchActivity|5eec465e"
+  },
+  {
+   "from": "kaipanla|MainActivity|261b144c",
+   "label": "6ab25d1ec5dc1",
+   "to": "kaipanla|SplashActivity|32979b59"
+  }
+ ]
+}

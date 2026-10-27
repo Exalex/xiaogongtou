@@ -1,0 +1,11 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# pi 手机启动器（小工头 · pi 驾驶舱）
+# 用法: pi [pi 参数...]     （root 或 Termux 用户下均可；默认工作目录 ~/pi-work）
+PREFIX=/data/data/com.termux/files/usr
+export HOME=${HOME:-/data/data/com.termux/files/home}
+export PATH=$PREFIX/bin:$PATH
+export TMPDIR=$PREFIX/tmp
+PI_DIR=$HOME/pi-runtime
+mkdir -p "${PI_WORKDIR:-$HOME/pi-work}"
+cd "${PI_WORKDIR:-$HOME/pi-work}" || cd "$HOME"
+exec $PREFIX/bin/node "$PI_DIR/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" "$@"

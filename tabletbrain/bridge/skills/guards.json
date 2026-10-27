@@ -1,0 +1,25 @@
+[
+ {
+  "id": "no_fake_pkg",
+  "when": "open_app",
+  "match": "不存在",
+  "action": "block",
+  "msg": "该包名本机不存在（已核对全部已安装应用）；请改用相关应用或搜索，不要臆造包名。"
+ },
+ {
+  "id": "no_login_tap",
+  "when": "tap",
+  "match_danger": true,
+  "action": "block",
+  "msg": "安全规则：不操作登录/验证码/密码类元素。"
+ },
+ {
+  "id": "weibo_rank_no_search",
+  "app": "com.sina.weibo",
+  "when": "tap",
+  "match": "搜索",
+  "page": "发现页",
+  "action": "warn",
+  "msg": "微博热搜榜在发现页顶部（更多热搜 → 热搜），不需要搜索。"
+ }
+]

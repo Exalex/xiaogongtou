@@ -1,0 +1,47 @@
+{
+ "id": "打开微博_看热搜前五是什么",
+ "name": "打开微博，看热搜前五是什么",
+ "family": "list",
+ "match": [
+  "前五",
+  "热搜",
+  "是什么"
+ ],
+ "app": "com.sina.weibo",
+ "steps": [
+  {
+   "do": "open_app",
+   "package": "com.sina.weibo"
+  },
+  {
+   "do": "tap",
+   "xy": [
+    84,
+    169
+   ]
+  },
+  {
+   "do": "open_app",
+   "package": "com.sina.weibo"
+  },
+  {
+   "do": "key",
+   "key_code": 4
+  },
+  {
+   "do": "tap",
+   "xy": [
+    540,
+    2277
+   ],
+   "text": "5"
+  }
+ ],
+ "status": "draft",
+ "runs": 0,
+ "ok": 0,
+ "created": 1791782939,
+ "last_run": 0,
+ "source_task": "打开微博，看热搜前五是什么",
+ "note": "自动固化（draft）：轨迹里没有产出答案的步骤；人工补一个 extract_text/extract_rank 后把 status 改成 candidate 才会生效"
+}

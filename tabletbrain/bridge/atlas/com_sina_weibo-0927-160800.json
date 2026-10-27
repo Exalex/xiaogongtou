@@ -1,0 +1,369 @@
+{
+ "package": "com.sina.weibo",
+ "pages": [
+  {
+   "sig": "weibo|VisitorMainTabActivi|3e7d6168",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "home",
+   "elems": 45,
+   "labels": [
+    "16:05",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为三格。",
+    "5G"
+   ]
+  },
+  {
+   "sig": "weibo|ForwardComposerActiv|3c74e900",
+   "activity": "com.sina.weibo.composerinde.ForwardComposerActivityV2",
+   "tag": "转发7",
+   "elems": 42,
+   "labels": [
+    "16:06",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为三格。"
+   ]
+  },
+  {
+   "sig": "weibo|DetailPageActivity|0ac63158",
+   "activity": "com.sina.weibo.feed.detailrefactor.DetailPageActivity",
+   "tag": "评论26",
+   "elems": 58,
+   "labels": [
+    "16:06",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为两格。"
+   ]
+  },
+  {
+   "sig": "weibo|VisitorMainTabActivi|6cc2aea1",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "首页",
+   "elems": 63,
+   "labels": [
+    "16:06",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为三格。"
+   ]
+  },
+  {
+   "sig": "weibo|VisitorMainTabActivi|66610882",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "视频",
+   "elems": 56,
+   "labels": [
+    "16:06",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为三格。"
+   ]
+  },
+  {
+   "sig": "weibo|VisitorMainTabActivi|36145f3d",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "发现",
+   "elems": 56,
+   "labels": [
+    "16:06",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为两格。"
+   ]
+  },
+  {
+   "sig": "weibo|LoginActivity|615021b1",
+   "activity": "com.sina.weibo.account.login.LoginActivity",
+   "tag": "消息",
+   "elems": 27,
+   "labels": [
+    "16:07",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为两格。"
+   ]
+  },
+  {
+   "sig": "weibo|VisitorMainTabActivi|2feae1f0",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "发现",
+   "elems": 37,
+   "labels": [
+    "16:07",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为三格。"
+   ]
+  },
+  {
+   "sig": "weibo|VisitorMainTabActivi|27922925",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "搜索",
+   "elems": 37,
+   "labels": [
+    "16:07",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号强度为三格。"
+   ]
+  },
+  {
+   "sig": "weibo|VisitorMainTabActivi|0051f5ad",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "首页",
+   "elems": 42,
+   "labels": [
+    "16:07",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  },
+  {
+   "sig": "weibo|VisitorMainTabActivi|3ea4e661",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "视频",
+   "elems": 56,
+   "labels": [
+    "16:07",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  },
+  {
+   "sig": "weibo|VisitorMainTabActivi|70af8bc0",
+   "activity": "com.sina.weibo.VisitorMainTabActivity",
+   "tag": "发现",
+   "elems": 56,
+   "labels": [
+    "16:07",
+    "UC浏览器通知：",
+    "小工头通知：",
+    "抖音通知：",
+    "京东通知：",
+    "大众点评通知：",
+    "音乐通知：",
+    "信息通知：",
+    "手机管家通知：",
+    "淘宝闪购通知：",
+    "钱包通知：",
+    "支付宝通知：",
+    "软件商店通知：",
+    "振铃器静音。",
+    "应用发出了有效位置信息请求",
+    "VoLTE",
+    "WLAN 信号满格。",
+    "手机信号满格。"
+   ]
+  }
+ ],
+ "edges": [
+  {
+   "from": "weibo|VisitorMainTabActivi|3e7d6168",
+   "label": "转发7",
+   "to": "weibo|ForwardComposerActiv|3c74e900"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|3e7d6168",
+   "label": "评论26",
+   "to": "weibo|DetailPageActivity|0ac63158"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|3e7d6168",
+   "label": "首页",
+   "to": "weibo|VisitorMainTabActivi|6cc2aea1"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|3e7d6168",
+   "label": "视频",
+   "to": "weibo|VisitorMainTabActivi|66610882"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|3e7d6168",
+   "label": "发现",
+   "to": "weibo|VisitorMainTabActivi|36145f3d"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|3e7d6168",
+   "label": "消息",
+   "to": "weibo|LoginActivity|615021b1"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|2feae1f0",
+   "label": "搜索",
+   "to": "weibo|VisitorMainTabActivi|27922925"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|2feae1f0",
+   "label": "首页",
+   "to": "weibo|VisitorMainTabActivi|0051f5ad"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|2feae1f0",
+   "label": "视频",
+   "to": "weibo|VisitorMainTabActivi|3ea4e661"
+  },
+  {
+   "from": "weibo|VisitorMainTabActivi|2feae1f0",
+   "label": "发现",
+   "to": "weibo|VisitorMainTabActivi|70af8bc0"
+  }
+ ]
+}

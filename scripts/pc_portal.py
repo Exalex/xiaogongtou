@@ -19,6 +19,8 @@ import urllib.request
 
 H = "http://192.168.3.170:8080"
 TOK = os.environ.get("PORTAL_TOKEN", "")  # 本机 portal 的 Bearer token（见项目 README）
+# 直连 opener：绕开系统代理（本机 127.0.0.1:7897 会把 192.168.3.170:8080 转成 502）
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def req(path, payload=None, raw=False, timeout=25):
@@ -27,7 +29,7 @@ def req(path, payload=None, raw=False, timeout=25):
     r.add_header("Authorization", "Bearer " + TOK)
     if data is not None:
         r.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(r, timeout=timeout) as resp:
+    with _OPENER.open(r, timeout=timeout) as resp:
         body = resp.read()
     if raw:
         return body

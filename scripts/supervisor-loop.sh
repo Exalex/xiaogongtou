@@ -63,6 +63,13 @@ while true; do
       settings put secure accessibility_enabled 1
       echo "[$(date)] entry a11y re-added -> $NEW" >> $LOG
     fi
+    # 5) 影子屏管家：开关打开（shadow.on 存在）→ 影子屏不在就拉起
+    if [ -f /data/adb/mobilerun-console/shadow.on ]; then
+      if ! dumpsys display 2>/dev/null | grep -q "scrcpy"; then
+        echo "[$(date)] shadow display missing -> start" >> $LOG
+        sh /data/adb/mobilerun-console/shadow.sh start >> $LOG 2>&1
+      fi
+    fi
     # 2) portal 守护（注意：重设时两个服务都要写回）
     if ! pidof com.mobilerun.portal >/dev/null 2>&1 || ! grep -q 1F90 /proc/net/tcp6 2>/dev/null; then
       echo "[$(date)] portal check failed -> rebind attempt" >> $LOG

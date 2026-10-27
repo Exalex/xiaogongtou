@@ -3,7 +3,7 @@
 """mini_console.py — 手机本机控制台（"入口"）v2 · App 式界面
 
 手机浏览器打开 http://127.0.0.1:8900/ —— 像手机 App 一样使用：
-  · 底部输入条（说一句话就发）＋ 模式分段（智能 / 极速 / 深度）
+  · 底部输入条（说一句话就发）＋ 模式分段（智能 / 极速 / 深度 / Pi 深度）
   · 运行中实时步骤；完成后结果大卡片（可再跑一次 / 收藏）
   · 「常用」收藏：一键运行，长按删除
   · 「历史记录」：跑过的任务可回看、重跑、收藏
@@ -11,7 +11,7 @@
 
 端点：
   GET  /                    页面
-  POST /api/run             {"task": str, "mode": "auto|jev|qwen"} → 启动任务
+  POST /api/run             {"task": str, "mode": "auto|jev|qwen|pi"} → 启动任务
   GET  /api/status          当前任务状态 + 日志尾巴
   POST /api/stop            停止当前任务
   GET  /api/history         最近任务记录（含结果；自动清理"中途夭折"的 running 残留）
@@ -33,6 +33,15 @@ import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+try:
+    import chat_ui
+except Exception:
+    chat_ui = None
+try:
+    import store as xstore
+except Exception:
+    xstore = None
+
 HOME = os.path.expanduser("~")
 PREFIX = "/data/data/com.termux/files/usr"
 AGENT = os.path.join(HOME, "mini_agent.py")
@@ -42,6 +51,9 @@ LOG = os.path.join(OUTD, "console.log")
 FAV_FILE = os.path.join(HOME, "bridge", "favorites.json")
 DEBUG_FILE = os.path.join(HOME, "bridge", "debug.json")
 HOTKEY_FILE = os.path.join(HOME, "bridge", "hotkey.json")
+EXEC_FILE = os.path.join(HOME, "bridge", "exec.json")
+REC_DIR = os.path.join(OUTD, "rec")
+SCREENRECORD = "/system/bin/screenrecord"
 PORT = int(os.environ.get("CONSOLE_PORT", "8900"))
 PING_URL = os.environ.get("LLM_PING", "http://192.168.3.75:8888/v1/models")
 
@@ -155,6 +167,97 @@ def hotkey_set(on):
     return bool(on)
 
 
+# ---------------------------------------------------------------- 执行模式（测试/正式）+ 录屏（P0）
+def exec_get():
+    """执行模式配置：mode=test（主屏可见）/ prod（影子屏，P1）；rec=是否录屏。"""
+    try:
+        with open(EXEC_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"mode": "prod" if d.get("mode") == "prod" else "test", "rec": bool(d.get("rec"))}
+    except Exception:
+        return {"mode": "test", "rec": False}
+
+
+def exec_set(mode=None, rec=None):
+    cur = exec_get()
+    if mode:
+        cur["mode"] = "prod" if str(mode) == "prod" else "test"
+    if rec is not None:
+        cur["rec"] = bool(rec)
+    try:
+        os.makedirs(os.path.dirname(EXEC_FILE), exist_ok=True)
+        with open(EXEC_FILE, "w", encoding="utf-8") as f:
+            json.dump(cur, f)
+    except Exception:
+        pass
+    return cur
+
+
+# ---------------------------------------------------------------- 影子屏管家（P1，正式模式用）
+SHADOW_SH = "/data/adb/mobilerun-console/shadow.sh"
+SHADOW_ON = "/data/adb/mobilerun-console/shadow.on"
+
+
+def shadow_run(action, timeout=40):
+    try:
+        # 必须用系统 sh（/system/bin/sh）——Termux 的 sh/pgrep 语义不同，shadow.sh 按系统 toybox 写的
+        r = subprocess.run(["/system/bin/sh", SHADOW_SH, action],
+                           capture_output=True, text=True, timeout=timeout)
+        return ((r.stdout or "") + (r.stderr or "")).strip()
+    except Exception as e:
+        return "err: %r" % (e,)
+
+
+def shadow_status():
+    out = shadow_run("status", timeout=25)
+    d = {"on": False, "id": "", "server": False, "client": False, "raw": out[-400:]}
+    for ln in out.splitlines():
+        if "=" in ln:
+            k, v = ln.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if k == "on":
+                d["on"] = (v == "1")
+            elif k == "id":
+                d["id"] = v
+            elif k == "server":
+                d["server"] = (v == "1")
+            elif k == "client":
+                d["client"] = (v == "1")
+    return d
+
+
+def shadow_ensure(timeout=45):
+    """确保影子屏可用；返回 display id（int），失败返回 0。"""
+    out = shadow_run("start", timeout=timeout)
+    m = re.search(r"id=(\d+)", out or "")
+    return int(m.group(1)) if m else 0
+
+
+def rec_start(rid):
+    """测试模式录屏（主屏）。返回文件路径或 None；失败不影响任务本身。
+    坑：必须清掉 LD_LIBRARY_PATH —— Termux 环境变量会让系统 screenrecord 加载错误 so 启动失败
+    （实测报错：CANNOT LINK EXECUTABLE ... cannot locate symbol "Xzs_Construct"）。"""
+    try:
+        os.makedirs(REC_DIR, exist_ok=True)
+        path = os.path.join(REC_DIR, rid + ".mp4")
+        env = dict(os.environ)
+        env.pop("LD_LIBRARY_PATH", None)
+        subprocess.Popen([SCREENRECORD, "--time-limit", "179", path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+        return path
+    except Exception:
+        return None
+
+
+def rec_stop(rid):
+    try:
+        subprocess.run(["pkill", "-INT", "-f", "screenrecord.*" + rid],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        pass
+
+
 def trace_read(rid=None, start=0, limit=500):
     """读某任务的执行链路（<rid>.trace.jsonl）。返回 {rid, lines, next, total}。"""
     if not rid:
@@ -200,23 +303,114 @@ def _save_meta(rid, extra=None):
         pass
 
 
+# ---------------- 感知预检（root 直调：portal 掉线"当场修"，不等看护的 5 分钟巡检） ----------------
+PORTAL_SVC = "com.mobilerun.portal/com.mobilerun.portal.service.MobilerunAccessibilityService"
+ENTRY_SVC = "com.xiaogongtou.entry/com.xiaogongtou.entry.EntryA11yService"
+
+
+def _shx(cmd, timeout=12):
+    try:
+        r = subprocess.run(["/system/bin/sh", "-c", cmd], capture_output=True, timeout=timeout)
+        return ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace").strip()
+    except Exception as e:
+        return "err:%r" % (e,)
+
+
+def _portal_alive():
+    if not _shx("pidof com.mobilerun.portal"):
+        return False, "portal 进程不在"
+    if not _shx("grep -l 1F90 /proc/net/tcp6 /proc/net/tcp 2>/dev/null"):
+        return False, "8080 未监听"
+    return True, "ok"
+
+
+def ensure_portal():
+    """开跑前预检 + 修复三部曲（与 supervisor-loop.sh 一致）。返回说明文本。"""
+    ok, why = _portal_alive()
+    if ok:
+        return "portal 正常"
+    log("precheck: portal down (%s) -> repair" % why)
+    _shx("settings put secure accessibility_enabled 0")
+    _shx("settings put secure enabled_accessibility_services ''")
+    time.sleep(1)
+    _shx("settings put secure enabled_accessibility_services '%s:%s'" % (PORTAL_SVC, ENTRY_SVC))
+    _shx("settings put secure accessibility_enabled 1")
+    time.sleep(4)
+    ok, why = _portal_alive()
+    if not ok:
+        _shx("monkey -p com.mobilerun.portal -c android.intent.category.LAUNCHER 1")
+        time.sleep(3)
+        _shx("content insert --uri content://com.mobilerun.portal/toggle_socket_server --bind enabled:b:true")
+        time.sleep(1.5)
+        ok, why = _portal_alive()
+    log("precheck repair result: %s" % ("ok" if ok else why))
+    return "portal 修复%s" % ("成功" if ok else "未成功（%s）" % why)
+
+
 def start_run(task, mode):
     global RUN
     with LOCK:
         if RUN["state"] == "running":
             return None, "已有任务在跑"
+        # —— 感知预检（加固）：wxsend 技能不依赖 portal → 跳过；其余任务掉线先修 ——
+        try:
+            import wx_intent
+            _send_task = bool(wx_intent.parse_send_intent(task))
+        except Exception:
+            _send_task = False
+        if _send_task:
+            log("precheck skipped (wxsend task; portal not needed)")
+        else:
+            try:
+                log("precheck: %s" % ensure_portal())
+            except Exception as e:
+                log("precheck error: %r" % (e,))
+        ex = exec_get()
+        exec_mode = ex.get("mode", "test")
+        display = 0
+        if exec_mode == "prod":
+            display = shadow_ensure()
+            if not display:
+                return None, "影子屏未就绪（正式模式需要影子屏；可在对话页点「正式模式」重试）"
         os.makedirs(RUNS, exist_ok=True)
         os.makedirs(OUTD, exist_ok=True)
         rid = datetime.now().strftime("%m%d-%H%M%S")
         out = os.path.join(RUNS, rid + ".out")
         f = open(out, "wb")
-        cmd = [sys.executable or "python3", AGENT, task, "--engine", mode, "--max-steps", "25"]
-        p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT,
-                             stdin=subprocess.DEVNULL, env=agent_env(rid), cwd=HOME)
+        pi_mode = (mode == "pi")
+        if pi_mode:
+            # —— Pi 深度引擎：手机本机 pi 运行时（多轮工具循环；P2）——
+            run_env = agent_env(rid)
+            run_env.pop("LD_LIBRARY_PATH", None)  # pi 的 bash 会直调系统二进制，需干净环境
+            pi_work = os.path.join(HOME, "pi-work")
+            os.makedirs(pi_work, exist_ok=True)
+            if display:
+                run_env["XGT_DISPLAY"] = str(display)
+            cmd = [os.path.join(HOME, "pi-runtime", "pi"), "-p", "--name", "console-" + rid,
+                   "--provider", "dgx", "--model", "qwen3.8-flash-next", task]
+            f.write(b"[pi] pi engine started\n")
+            f.flush()
+            p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, env=run_env, cwd=pi_work)
+        else:
+            cmd = [sys.executable or "python3", AGENT, task, "--engine", mode, "--max-steps", "100"]
+            if display:
+                cmd += ["--display", str(display)]
+            p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, env=agent_env(rid), cwd=HOME)
+        rec = rec_start(rid) if (ex.get("rec") and exec_mode == "test") else None
         RUN = {"id": rid, "task": task, "mode": mode, "proc": p, "out": out,
-               "started": time.time(), "ended": 0, "state": "running", "rc": None}
+               "started": time.time(), "ended": 0, "state": "running", "rc": None,
+               "exec_mode": exec_mode, "rec": rec, "display": display,
+               "engine_hint": "pi" if pi_mode else None}
         _save_meta(rid)
-        log("run %s started: mode=%s task=%s" % (rid, mode, task))
+        try:
+            if xstore:
+                xstore.start_session(rid, task, mode, exec_mode=exec_mode, rec=rec)
+        except Exception as e:
+            log("store start failed: %r" % (e,))
+        log("run %s started: mode=%s exec=%s display=%s rec=%s task=%s"
+            % (rid, mode, exec_mode, display, bool(rec), task))
         return rid, None
 
 
@@ -241,6 +435,13 @@ def stop_run():
         RUN["ended"] = time.time()
         RUN["rc"] = p.poll()
         _save_meta(RUN["id"])
+        rec_stop(RUN["id"])
+        try:
+            if xstore:
+                xstore.finish_session(RUN["id"], "stopped", ended=RUN["ended"],
+                                      failed_reason="已手动停止")
+        except Exception as e:
+            log("store stop failed: %r" % (e,))
         log("run %s stopped by user" % RUN["id"])
         return True
 
@@ -251,9 +452,37 @@ def _finalize_locked():
         RUN["rc"] = p.returncode
         RUN["ended"] = time.time()
         RUN["state"] = "done" if p.returncode == 0 else "failed"
-        info = parse_run(read_out(RUN["id"]))
+        pi_run = (RUN.get("engine_hint") == "pi")
+        info = parse_run(read_out(RUN["id"]), pi_mode=pi_run)
+        if pi_run:
+            info["engine"] = "pi"
         _save_meta(RUN["id"], {"result": info.get("result"), "engine": info.get("engine"),
                                "usage": info.get("usage"), "failed_reason": info.get("failed_reason")})
+        # —— P0：录屏收尾 + 数据仓落库 ——
+        rec_arg = None
+        rec_path = RUN.get("rec")
+        if rec_path:
+            rec_stop(RUN["id"])
+            rec_arg = ""  # 先按"失败"处理（空串=清除），成功再回填路径
+            last = -1
+            for _ in range(8):
+                time.sleep(0.5)
+                try:
+                    sz = os.path.getsize(rec_path) if os.path.exists(rec_path) else 0
+                except Exception:
+                    sz = 0
+                if sz > 0 and sz == last:
+                    rec_arg = rec_path  # 尺寸稳定且非空 → 录屏成功
+                    break
+                last = sz
+        try:
+            if xstore:
+                xstore.finish_session(RUN["id"], RUN["state"], engine=info.get("engine"),
+                                      usage=info.get("usage"), result=info.get("result"),
+                                      failed_reason=info.get("failed_reason"),
+                                      ended=RUN["ended"], rec=rec_arg)
+        except Exception as e:
+            log("store finish failed: %r" % (e,))
         log("run %s finished rc=%s" % (RUN["id"], p.returncode))
 
 
@@ -268,7 +497,7 @@ def read_out(rid, max_bytes=20000):
         return []
 
 
-def parse_run(lines):
+def parse_run(lines, pi_mode=False):
     info = {"engine": None, "step": 0, "result": None, "failed_reason": None,
             "switches": [], "usage": None}
     done_idx = None
@@ -303,6 +532,23 @@ def parse_run(lines):
                 break
             buf.append(s)
         info["result"] = "\n".join(x for x in buf if x.strip())
+    if pi_mode:
+        info["engine"] = info["engine"] or "pi"
+    if pi_mode and info["result"] is None:
+        # pi 输出 = 最终答复正文（无 [agent] 标记）→ 取尾部连续非空块
+        tail = []
+        for ln in reversed(lines):
+            s = ln.rstrip()
+            if not s.strip():
+                if tail:
+                    break
+                continue
+            if s.lstrip().startswith("[") and tail:
+                break
+            tail.append(s)
+            if len(tail) >= 14:
+                break
+        info["result"] = "\n".join(reversed(tail)).strip() or None
     return info
 
 
@@ -318,7 +564,7 @@ def status_payload():
         rc = RUN["rc"]
     elapsed = (ended or time.time()) - started if started else 0
     lines = read_out(rid)
-    info = parse_run(lines)
+    info = parse_run(lines, pi_mode=(mode == "pi"))
     if state == "stopped":
         info["failed_reason"] = info.get("failed_reason") or "已手动停止"
     return {
@@ -494,6 +740,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:30;pointer-events:none}
   <div class="topbar">
     <div class="brand"><span class="logo">📱</span>手机助手</div>
     <div style="display:flex;align-items:center;gap:8px">
+      <a class="dbgbtn" href="/chat" title="对话（历史 / 数据）" style="text-decoration:none">💬</a>
       <button id="hkbtn" class="dbgbtn" title="音量键快捷键（点按开关）">⌨</button>
       <button id="dbgbtn" class="dbgbtn" title="调试模式（点按开关）">🐞</button>
       <div class="pill"><span class="dot" id="dot"></span><span id="nettext">连接中</span></div>
@@ -537,6 +784,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:30;pointer-events:none}
       <button class="mode on" data-m="auto">智能</button>
       <button class="mode" data-m="jev">极速</button>
       <button class="mode" data-m="qwen">深度</button>
+      <button class="mode" data-m="pi" title="Pi 深度引擎（多轮工具循环）">Pi</button>
     </div>
     <div class="inputrow">
       <textarea id="task" rows="1" enterkeyhint="send"
@@ -919,6 +1167,40 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"on": debug_get()}))
         elif p == "/api/hotkey":
             self._send(200, json.dumps({"on": hotkey_get()}))
+        elif p == "/chat":
+            self._send(200, (chat_ui.CHAT_HTML if chat_ui else "<h3>chat_ui.py 未部署</h3>"),
+                       "text/html; charset=utf-8")
+        elif p == "/api/exec":
+            self._send(200, json.dumps(exec_get()))
+        elif p == "/api/shadow":
+            self._send(200, json.dumps(shadow_status(), ensure_ascii=False))
+        elif p == "/api/sessions":
+            try:
+                limit = int((q.get("limit") or ["50"])[0])
+            except Exception:
+                limit = 50
+            limit = max(1, min(200, limit))
+            try:
+                offset = int((q.get("offset") or ["0"])[0])
+            except Exception:
+                offset = 0
+            offset = max(0, offset)
+            kw = (q.get("q") or [None])[0] or None
+            items = xstore.list_sessions(limit=limit, q=kw, offset=offset) if xstore else []
+            total = xstore.count_sessions(q=kw) if xstore else 0
+            self._send(200, json.dumps({"items": items, "total": total, "offset": offset}, ensure_ascii=False))
+        elif p == "/api/session":
+            rid = (q.get("rid") or [None])[0]
+            d = xstore.get_session(rid) if (xstore and rid) else None
+            self._send(200 if d else 404, json.dumps(d or {"error": "not found"}, ensure_ascii=False))
+        elif p == "/api/rec":
+            rid = (q.get("rid") or [""])[0] or ""
+            safe = re.sub(r"[^0-9A-Za-z_\-]", "", rid)
+            try:
+                with open(os.path.join(REC_DIR, safe + ".mp4"), "rb") as f:
+                    self._send(200, f.read(), "video/mp4")
+            except Exception:
+                self._send(404, b"rec not found", "text/plain; charset=utf-8")
         elif p == "/api/trace":
             rid = (q.get("rid") or [None])[0]
             try:
@@ -943,7 +1225,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/run":
             task = (body.get("task") or "").strip()
             mode = (body.get("mode") or "auto").strip().lower()
-            if mode not in ("auto", "jev", "qwen"):
+            if mode not in ("auto", "jev", "qwen", "pi"):
                 mode = "auto"
             if not task:
                 self._send(400, json.dumps({"error": "任务为空"}))
@@ -969,6 +1251,29 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": True, "on": debug_set(bool(body.get("on")))}))
         elif p == "/api/hotkey":
             self._send(200, json.dumps({"ok": True, "on": hotkey_set(bool(body.get("on")))}))
+        elif p == "/api/exec":
+            cur = exec_set(mode=body.get("mode"), rec=body.get("rec"))
+            self._send(200, json.dumps({"ok": True, "mode": cur["mode"], "rec": cur["rec"]}))
+        elif p == "/api/shadow":
+            act = (body.get("action") or "").strip()
+            if act == "start":
+                try:
+                    open(SHADOW_ON, "w").close()
+                except Exception:
+                    pass
+                out = shadow_run("start", timeout=45)
+            elif act == "stop":
+                try:
+                    os.remove(SHADOW_ON)
+                except OSError:
+                    pass
+                out = shadow_run("stop", timeout=25)
+            else:
+                out = "err: action must be start|stop"
+            st = shadow_status()
+            st["ok"] = True
+            st["out"] = out[-400:]
+            self._send(200, json.dumps(st, ensure_ascii=False))
         else:
             self._send(404, json.dumps({"error": "not found"}))
 
@@ -986,6 +1291,14 @@ class Srv(ThreadingHTTPServer):
 def main():
     os.makedirs(RUNS, exist_ok=True)
     os.makedirs(OUTD, exist_ok=True)
+    try:
+        if xstore:
+            xstore.init()
+            n = xstore.import_runs(RUNS, limit=120)
+            if n:
+                log("store: imported %d old runs" % n)
+    except Exception as e:
+        log("store init failed: %r" % (e,))
     t = threading.Thread(target=llm_probe, daemon=True)
     t.start()
     srv = Srv(("127.0.0.1", PORT), Handler)

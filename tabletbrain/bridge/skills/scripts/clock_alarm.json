@@ -1,0 +1,47 @@
+{
+ "id": "clock_alarm",
+ "name": "时钟闹钟时间",
+ "family": "read",
+ "match": [
+  "闹钟",
+  "闹铃",
+  "时钟"
+ ],
+ "app": "com.coloros.alarmclock",
+ "home_path": {
+  "back": 1,
+  "until": [
+   "闹钟",
+   "世界时钟"
+  ],
+  "max_back": 2,
+  "tap_home_tab": [
+   162,
+   2268
+  ]
+ },
+ "steps": [
+  {
+   "do": "open_app",
+   "verify": {
+    "text": [
+     "闹钟",
+     "世界时钟"
+    ]
+   }
+  },
+  {
+   "do": "extract_text",
+   "text": "起床闹铃",
+   "dy": 120,
+   "done": true
+  }
+ ],
+ "status": "active",
+ "runs": 5,
+ "ok": 5,
+ "device": "LE2110/1080x2400",
+ "created": 1760000000,
+ "last_run": 1791783199,
+ "note": "手工种子（来源：2026-10-11 真机探测 闹钟页「07:00 / 法定工作日|起床闹铃」）；dy=120 用于把左侧时间拼进答案"
+}

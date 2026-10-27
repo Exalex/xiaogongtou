@@ -1,0 +1,46 @@
+{
+ "id": "settings_wifi",
+ "name": "设置当前WiFi",
+ "family": "read",
+ "match": [
+  "wifi",
+  "WIFI",
+  "无线",
+  "wlan",
+  "WLAN",
+  "局域网",
+  "连的什么网"
+ ],
+ "app": "com.android.settings",
+ "home_path": {
+  "back": 2,
+  "until": [
+   "WLAN",
+   "连接与共享"
+  ],
+  "max_back": 4
+ },
+ "steps": [
+  {
+   "do": "open_app",
+   "verify": {
+    "text": [
+     "WLAN",
+     "连接与共享"
+    ]
+   }
+  },
+  {
+   "do": "extract_text",
+   "text": "WLAN",
+   "done": true
+  }
+ ],
+ "status": "deprecated",
+ "runs": 7,
+ "ok": 4,
+ "device": "LE2110/1080x2400",
+ "created": 1760000000,
+ "last_run": 1791783753,
+ "note": "手工种子（来源：2026-10-11 真机探测 设置首页「WLAN / Xiaomi_3ADA」同行拼接）"
+}
