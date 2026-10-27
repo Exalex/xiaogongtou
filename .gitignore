@@ -27,3 +27,22 @@ fpinfo_*
 flash-work/
 patch_work/
 fpinfo_work/
+
+# 依赖包与构建缓存（体积大，不入库）
+pi-build/
+node_modules/
+*.tgz
+
+# 端侧运行时产物 / 凭据（含 portal token、jev key —— 泄露即被冒用）
+tabletbrain/secrets_tablet.json
+tabletbrain/bridge/secrets.json
+tabletbrain/full_dex.txt
+tabletbrain/*.apk
+secrets*.json
+!entry/local_secrets.json.example
+
+# 临时/误建文件
+sda13
+sda17
+port_trace.txt
+*.log.bak
