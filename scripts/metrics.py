@@ -106,7 +106,15 @@ def analyze(path):
     waste = Counter()
     action_kinds = Counter()
     blocked = 0
+    fails = []
     for r in recs:
+        if r.get("kind") == "fail":
+            fails.append({"code": r.get("code") or "",
+                          "stage": r.get("stage") or "",
+                          "reason": str(r.get("text") or "")[:60],
+                          "x_cov": r.get("x_cov") or 0,
+                          "blind": r.get("blind_taps") or 0})
+            continue
         st = r.get("step")
         if st is None:
             continue
@@ -181,6 +189,7 @@ def analyze(path):
         "per_step_llm": lat,
         "act_avg": round(sum(action_ms) / len(action_ms), 2) if action_ms else 0,
         "act_total": round(sum(action_ms), 1),
+        "fails": fails,
     }
 
 
@@ -227,6 +236,35 @@ def main():
     print("=== 浪费归因（全部 trace 合计）===")
     for k, v in tot_w.most_common():
         print("  %-22s %3d 次" % (k, v))
+
+    # —— 失败病种（2026-10-28）——
+    # code 来自 tabletbrain/scripts_lib.py 的 FAIL_CODE_NAMES：
+    # E- 环境（登录/超时/拉不起来）、A- 答案（被复核驳回）、
+    # P- 感知（树里没读到/没看全/往空白处点）、D- 决策（动作被拒/身份认不出）
+    fail_rows = [f for m in rows for f in (m.get("fails") or [])]
+    print()
+    if not fail_rows:
+        print("=== 失败病种 ===（本批 trace 没有失败记录，或都是老版本 trace 无 code 字段）")
+        return
+    fam = Counter()
+    code_n = Counter()
+    for f in fail_rows:
+        code_n[f["code"] or "(无code)"] += 1
+        fam[(f["code"] or "?")[0]] += 1
+    FAM_CN = {"E": "环境类·外部限制", "A": "答案类·答错了",
+              "P": "感知类·没看见", "D": "决策类·选错了"}
+    print("=== 失败病种（%d 次失败）===" % len(fail_rows))
+    for k, v in code_n.most_common():
+        share = 100.0 * v / len(fail_rows)
+        print("  %-11s %3d 次  %4.0f%%" % (k, v, share))
+    print("  —— 按族合计 ——")
+    for c, v in fam.most_common():
+        print("  %-16s %3d 次" % (FAM_CN.get(c, "未知"), v))
+    _cov = [f for f in fail_rows if f.get("x_cov")]
+    if _cov:
+        _bad = [f for f in _cov if f["x_cov"] < 0.5]
+        print("  其中感知残缺（横向覆盖<50%%）: %d / %d 次，最小 %.0f%%"
+              % (len(_bad), len(_cov), min(f["x_cov"] for f in _cov) * 100))
 
     # 单步模型耗时分布
     all_lat = [x for m in rows for x in m["per_step_llm"] if x and x > 0]

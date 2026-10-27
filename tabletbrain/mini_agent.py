@@ -557,9 +557,18 @@ def parse_uiauto_xml(xml):
     return out
 
 
+_UIAUTO_DEAD = [False]   # root 桥不可用标记（无 root 机型 / 桥没起）→ 之后不再白等 8 秒
+
+
 def uiauto_elements(timeout=8.0):
     """经 root 桥（uidump-bridge.sh）取 uiautomator 完整树；失败返回 []。
-    用途：portal 的 a11y 树会过滤"不重要"视图（如微博信息流），此处补盲。"""
+    用途：portal 的 a11y 树会过滤"不重要"视图（如微博信息流），此处补盲；
+    2026-10-28 起也用于"感知覆盖度过低时换第二个通道"。
+
+    2026-10-28：加不可用缓存。无 root 机型上桥不存在，原来每次调用白等满 8 秒超时；
+    现在第一次没拿到就永久标记，后续直接返回空。"""
+    if _UIAUTO_DEAD[0]:
+        return []
     req = os.path.expanduser("~/bridge/.uidump_req")
     out = os.path.expanduser("~/bridge/.uidump.xml")
     try:
@@ -570,13 +579,19 @@ def uiauto_elements(timeout=8.0):
         with open(req, "w", encoding="utf-8") as f:
             f.write(str(time.time()))
         t0 = time.time()
+        got = False
         while time.time() - t0 < timeout:
             try:
                 if os.path.getsize(out) > 100:
+                    got = True
                     break
             except OSError:
                 pass
             time.sleep(0.15)
+        if not got:
+            _UIAUTO_DEAD[0] = True
+            print("[agent] uiauto 补盲不可用（root 桥无响应）→ 本次运行不再尝试")
+            return []
         with open(out, encoding="utf-8", errors="replace") as f:
             elems = parse_uiauto_xml(f.read())
         # 限流：uiautomator 树可能几百个元素（Jev criteria 上限 255 / prompt 也会爆炸）
@@ -1138,10 +1153,12 @@ def render_experience(exps):
     return "\n".join(lines)
 
 
-def save_failure(task, reason, steps, stage="", pattern="", evidence=""):
+def save_failure(task, reason, steps, stage="", pattern="", evidence="", code=""):
     """任务失败时保存教训（按任务文本去重置顶，上限 30 条），下次同类任务注入"别再做"。
     2026-10-11：增加 stage（感知/规划/决策/执行/校验/锚点）与 pattern（错误签名）——
-    这样"同一个错误反复出现"才能被统计出来，进而编译成硬闸门（guards.json）。"""
+    这样"同一个错误反复出现"才能被统计出来，进而编译成硬闸门（guards.json）。
+    2026-10-28：增加 code（细类，如 P-COVER / E-LOGIN，见 scripts_lib.FAIL_CODE_NAMES）——
+    stage 说"卡在哪一关"，code 说"是哪一类毛病"，报表按 code 聚合才看得出真问题。"""
     if not task or not steps:
         return
     try:
@@ -1156,6 +1173,7 @@ def save_failure(task, reason, steps, stage="", pattern="", evidence=""):
         data = [d for d in data if d.get("task") != task]
         data.insert(0, {"task": task, "kind": "failure", "reason": (reason or "")[:80],
                         "stage": stage or "", "pattern": pattern or "",
+                        "code": code or "",
                         "evidence": (evidence or "")[:160],
                         "steps": steps[-12:], "ts": int(time.time())})
         with open(FAILURES_PATH, "w", encoding="utf-8") as f:
@@ -2845,6 +2863,8 @@ def main():
     goal_hinted = set()        # 已发过软提示的子目标（同一目标只提示一次，避免刷屏干扰）
     max_block_streak = 0       # 本次运行的最大连败（供失败归类 / 脚本固化判定）
     min_elems_seen = 999       # 本次运行见过的最少元素数（感知是否失效）
+    x_cov_min = 1.0            # 本次运行见过的最小横向覆盖率（2026-10-28：感知是否"半瞎"）
+    percept_boost = [0]        # 感知降级已尝试次数（uiautomator 补通道，每任务只补一次）
     anchor_miss = 0            # 页面身份未命中次数（锚点是否够硬）
     lock_strikes = 0           # 熄屏/锁屏连续命中（迭代5：≥2 判死，烧预算前 fail-fast）
     errs = []                  # 执行错误文案（供失败归类）
@@ -3167,6 +3187,33 @@ def main():
                     aborted = True
                     break
         elems = collect_elements(state)
+        # —— 感知降级（2026-10-28）：横向覆盖 < 50% → 换第二个通道补一次 ——
+        #    背景：酷安实测 a11y 树只覆盖屏宽 39%，但元素数有 20+，
+        #    老规则"元素数<3 才叫感知失效"根本发现不了这类"半瞎"。
+        #    每任务只补一次：真·空页面补不出东西，反复补会白烧 8 秒/步。
+        if percept_boost[0] < 1 and SL is not None:
+            try:
+                _hc = SL.percept_health(elems, _SCREEN["w"], _SCREEN["h"])
+                if _hc["level"] == "bad":
+                    percept_boost[0] += 1
+                    _ue = uiauto_elements()
+                    if _ue:
+                        _seen = set((e[1] // 12, e[2] // 12) for e in elems)
+                        _add = [e for e in _ue if (e[1] // 12, e[2] // 12) not in _seen]
+                        if _add:
+                            _base = len(elems)
+                            elems = elems + [(_base + i, e[1], e[2], e[3], e[4])
+                                             for i, e in enumerate(_add)]
+                            print("[step %d] 感知降级：横向只覆盖 %.0f%% → uiautomator 补 %d 个"
+                                  "（%d → %d）" % (step, _hc["x_cov"] * 100,
+                                                  len(_add), _base, len(elems)))
+                            tracer.log(step, "result",
+                                       "感知降级 uiautomator +%d" % len(_add))
+                        else:
+                            print("[step %d] 感知降级：横向只覆盖 %.0f%%，uiautomator 无新元素"
+                                  " → 只靠提示词约束" % (step, _hc["x_cov"] * 100))
+            except Exception as _e_pb:
+                print("[step %d] 感知降级跳过: %r" % (step, _e_pb))
         cur_pkg = ""
         try:
             cur_pkg = (state.get("phone_state") or {}).get("packageName") or ""
@@ -4196,6 +4243,15 @@ def main():
         # 统计（供失败归类 / 脚本固化）
         if elems:
             min_elems_seen = min(min_elems_seen, len(elems))
+            # 2026-10-28：同时记横向覆盖率。酷安实测"元素够多但只覆盖 39%"，
+            # 单看元素数永远发现不了，必须单独记。
+            try:
+                if SL is not None and _SCREEN["w"]:
+                    _hc = SL.percept_health(elems, _SCREEN["w"], _SCREEN["h"])
+                    if _hc["x_cov"] > 0:
+                        x_cov_min = min(x_cov_min, _hc["x_cov"])
+            except Exception:
+                pass
         if not ok and exec_err:
             errs.append(exec_err)
         try:
@@ -4298,11 +4354,36 @@ def main():
                 tracer.log(step, "done", _m)
                 tracer.close()
                 if exec_log:
+                    # 2026-10-28 修两件事：
+                    # ① 原来写成 _stage= / _pattern=（形参名是 stage/pattern）→ 每次
+                    #    TypeError 被 except 吞掉，这条失败从来没落过盘；
+                    # ② "无进展放弃"和"步数用尽"一样是失败，必须走同一套疾病分类，
+                    #    否则报表只统计到一种失败，等于没统计。
+                    _bc, _bn = "D-LOOP", "动作被反复拒绝"
                     try:
-                        save_failure(task, "无进展兜底放弃", exec_log,
-                                     _stage="步进", _pattern="no_progress")
+                        if SL is not None:
+                            _bc, _bf, _bn = SL.classify_code({
+                                "min_elems": min_elems_seen,
+                                "x_cov": (x_cov_min if 0 < x_cov_min < 1.0 else 0),
+                                "blind_taps": blind_taps[0],
+                                "max_block_streak": max_block_streak,
+                                "anchor_miss": anchor_miss,
+                            })
                     except Exception:
                         pass
+                    try:
+                        save_failure(task, "无进展兜底放弃", exec_log,
+                                     "步进", "no_progress", "", _bc)
+                        tracer.log(None, "fail", "无进展兜底放弃",
+                                   stage="步进", code=_bc, pattern="no_progress",
+                                   x_cov=round(x_cov_min, 3) if 0 < x_cov_min < 1.0 else 0,
+                                   blind_taps=blind_taps[0])
+                    except Exception:
+                        pass
+                    print("[agent] 卡点: stage=步进 | code=%s（%s） | 覆盖=%.0f%% | 盲点=%d | 步数=%d/%d"
+                          % (_bc, _bn,
+                             (x_cov_min * 100) if 0 < x_cov_min < 1.0 else 0,
+                             blind_taps[0], len(exec_log), max_steps))
                 return 0
             print("[step %d] [reset] 连续无进展（%s）→ 注入迷路重置提示（第 %d/3 次）" %
                   (step, ",".join(flags) if flags else "-", stall_resets))
@@ -4326,12 +4407,12 @@ def main():
         fail_reason = "步数用尽（%d 步未完成）" % max_steps
         print("[agent] max steps (%d) reached, no done." % max_steps)
     if exec_log:
-        _stage, _pattern, _evidence = "", "", ""
+        _stage, _pattern, _evidence, _code = "", "", "", ""
         if SL is not None:
             try:
                 _open_fail = sum(1 for s in exec_log
                                  if str(s).startswith("open_app") and str(s).endswith("（失败）"))
-                _stage, _pattern = SL.classify_failure({
+                _stats = {
                     "min_elems": min_elems_seen,
                     "plan_pkg": (plan or {}).get("app_package") or "",
                     "no_plan_app": bool(plan) and not (plan or {}).get("app_package"),
@@ -4341,16 +4422,43 @@ def main():
                     "anchor_miss": anchor_miss,
                     "errs": errs,
                     "last_err": errs[-1] if errs else "",
-                })
+                    # —— 2026-10-28 新增三个维度，专治"分不清是瞎了还是傻了" ——
+                    "x_cov": (x_cov_min if 0 < x_cov_min < 1.0 else 0),
+                    "blind_taps": blind_taps[0],
+                    "login_wall": bool(login_warned or "登录" in str(result or "")
+                                       or "登录" in fail_reason),
+                    "timeout": (not aborted) or ("步数用尽" in fail_reason),
+                }
+                _stage, _pattern = SL.classify_failure(_stats)
                 _evidence = "|".join(errs[-3:])[:160]
+                _code = SL.classify_code(_stats)[0]
+                # 2026-10-28：老 classify_failure 只看"元素数<3 / 锚点miss / done驳回"，
+                # 步数用尽这类它判不出来，会返回"未知"（真机实测：5 步用尽 → stage=未知）。
+                # 既然细类已经判出族了，就用族名兜底，避免报表里一堆"未知"。
+                if _stage == "未知" and _code != "X-UNKNOWN":
+                    _stage = SL.FAIL_CODE_NAMES.get(_code, ("", ""))[0] or "未知"
+                    if _pattern == "未知":
+                        _pattern = _code.lower()
             except Exception as e:
                 print("[agent] 失败归类异常（忽略）: %r" % (e,))
-        save_failure(task, fail_reason, exec_log, _stage, _pattern, _evidence)
-        print("[agent] 失败教训已记录: %d 步（stage=%s pattern=%s）→ ~/bridge/skills/failures.json"
-              % (len(exec_log), _stage or "-", _pattern or "-"))
-        # 失败交还：把"卡在哪一关"明确报出来（控制台/对话页据此展示"重试 / 交给用户"）
-        print("[agent] 卡点: stage=%s | pattern=%s | 步数=%d/%d"
-              % (_stage or "未知", _pattern or "-", len(exec_log), max_steps))
+        save_failure(task, fail_reason, exec_log, _stage, _pattern, _evidence, _code)
+        # 2026-10-28：失败病种也写进 trace —— 这样 metrics.py 不用再单独拉 failures.json
+        # 就能按 code 聚合出"这个月主要栽在哪一类"。
+        try:
+            tracer.log(None, "fail", fail_reason, stage=_stage or "",
+                       code=_code or "", pattern=_pattern or "",
+                       x_cov=round(x_cov_min, 3) if 0 < x_cov_min < 1.0 else 0,
+                       blind_taps=blind_taps[0])
+        except Exception:
+            pass
+        print("[agent] 失败教训已记录: %d 步（stage=%s pattern=%s code=%s）→ ~/bridge/skills/failures.json"
+              % (len(exec_log), _stage or "-", _pattern or "-", _code or "-"))
+        # 失败交还：把"卡在哪一关 / 是哪一类毛病"明确报出来
+        # （控制台/对话页据此展示"重试 / 换通道 / 交给用户"）
+        print("[agent] 卡点: stage=%s | code=%s | 覆盖=%.0f%% | 盲点=%d | 步数=%d/%d"
+              % (_stage or "未知", _code or "-",
+                 (x_cov_min * 100) if 0 < x_cov_min < 1.0 else 0,
+                 blind_taps[0], len(exec_log), max_steps))
     tracer.close()
     return 2
 

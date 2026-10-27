@@ -3,6 +3,23 @@
 > 规则：每次动过代码或文档都要发布一版（`./release.sh "说明"`），tag 与 `entry/AndroidManifest.xml` 的 versionName 对齐。
 > 具体技术细节不重复写在这里——每一版在 `PLAN.md`（滚动日志）、`开发笔记.md`（迭代账本）和日期化实测报告里都有完整记录。
 
+## v1.9.1 · 2026-10-28
+
+**方案 A「修地基」的三件事，真机验证通过。** 本次只动端侧脚本，APK 仍是 1.9 / vc15。
+
+- **真源收敛**：`scripts/{mini_agent,mini_console,scripts_lib}.py` 改成转发壳（`exec` 真源同名文件），
+  import 与直接运行行为一致；至此改代码只有一个地方可改，不会再分叉。旧副本已核对无任何独有实现
+- **感知自报 + 降级**：新增 `percept_health()` 输出元素数/横向覆盖/纵向覆盖/等级；
+  横向覆盖 < 50% 时自动调 `uiautomator` 补一次通道（每任务一次）。
+  同时给 `uiauto_elements` 加不可用缓存 —— 无 root 机型原来每步白等 8 秒超时，现在只试一次
+- **失败自动分类**：新增 `classify_code()`，把失败判成 10 类病种
+  （P-COVER/P-EMPTY/P-BLIND、D-LOOP/D-ANCHOR、A-REJECT、E-LOGIN/E-TIMEOUT/E-LAUNCH、X-UNKNOWN），
+  写进 `failures.json` 和 trace；`metrics.py` 新增「失败病种」报表（按 code 与按族两级汇总）
+- **修掉一个静默 bug**：「无进展兜底放弃」原来用 `_stage=` / `_pattern=` 传参，
+  而形参名是 `stage` / `pattern` → 每次都 TypeError 被 except 吞掉，这条失败从来没落过盘
+- **真机验证**（Y700 / Android 16 / 无 root，经反向隧道接模型）：
+  `卡点: stage=环境 | code=E-TIMEOUT | 覆盖=50% | 盲点=0 | 步数=4/4`
+
 ## v1.9.0 · 2026-10-28
 
 **首次把「真正在跑的东西」完整纳入版本控制。** 此前仓库里跟的是 10 月 12 日的旧副本，手机上的端侧真源大半没入库。

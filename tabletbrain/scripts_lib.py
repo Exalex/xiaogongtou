@@ -1036,6 +1036,111 @@ def classify_failure(stats):
     return "未知", "未知"
 
 
+# ================================================================ 感知健康度（2026-10-28）
+# 阈值只在这里定义一处。mini_agent 的"感知边界提示"与"感知降级判定"都走这里，
+# 避免提示词说 72%、降级判定用 50% 这种两套口径打架。
+PERCEPT_X_HINT = 0.72    # 横向 < 72% → 提示模型"你只看了一部分"
+PERCEPT_Y_HINT = 0.30    # 纵向 < 30% → 同上。阈值刻意压低：列表页元素天然集中在中间
+                         # 一条带（上下是标题栏和留白），按 0.55 判会天天误报"纵向没看全"
+PERCEPT_X_BAD = 0.50     # 横向 < 50% → 判定感知残缺，触发换通道/兜底
+PERCEPT_MIN_ELEMS = 4    # 元素数 < 4 → 判定"树里没读到东西"
+
+
+def percept_health(elems, screen_w=0, screen_h=0):
+    """元素清单 → 感知健康度（纯计算，0 模型，可单测）。
+
+    2026-10-28 新增。背景：酷安实测 a11y 树只覆盖屏宽 39%，但元素数有 20+，
+    老规则"元素数 < 3 才算感知问题"直接漏判 —— 它有东西可读，只是读得不全。
+    这类"半瞎"最容易被误读成"模型犯傻"，所以要把覆盖率和元素数分开记。
+
+    返回 {"n": 元素数, "x_cov": 横向覆盖, "y_cov": 纵向覆盖,
+          "level": "empty"|"bad"|"narrow"|"ok", "note": 中文短语}
+    screen_w/screen_h 缺失时 x_cov/y_cov 记 0，level 只按元素数判。
+    """
+    try:
+        es = list(elems or [])
+    except Exception:
+        es = []
+    n = len(es)
+    xs = [e[1] for e in es if len(e) > 2 and isinstance(e[1], int)]
+    ys = [e[2] for e in es if len(e) > 2 and isinstance(e[2], int)]
+    x_cov = y_cov = 0.0
+    if xs and screen_w:
+        x_cov = (max(xs) - min(xs)) / float(screen_w)
+    if ys and screen_h:
+        y_cov = (max(ys) - min(ys)) / float(screen_h)
+    if n < PERCEPT_MIN_ELEMS:
+        level, note = "empty", "树里几乎没读到元素"
+    elif x_cov and x_cov < PERCEPT_X_BAD:
+        level, note = "bad", "横向只看得到 %.0f%%" % (x_cov * 100)
+    elif (x_cov and x_cov < PERCEPT_X_HINT) or (y_cov and y_cov < PERCEPT_Y_HINT):
+        level, note = "narrow", "屏幕没看全"
+    else:
+        level, note = "ok", "覆盖正常"
+    return {"n": n, "x_cov": round(x_cov, 3), "y_cov": round(y_cov, 3),
+            "level": level, "note": note}
+
+
+# ================================================================ 失败细类（2026-10-28）
+# 与 classify_failure 的分工：
+#   classify_failure → (stage, pattern)，回答"卡在哪一关"（感知/规划/决策/执行/校验/锚点）
+#   classify_code    → (code, family, name)，回答"是哪一类毛病"，供报表聚合与硬闸门挖据
+# 两者不互相替代：stage 用来看流程，code 用来看病种。
+FAIL_CODE_NAMES = {
+    "E-LOGIN":   ("环境", "需要登录"),
+    "E-TIMEOUT": ("环境", "超时或预算耗尽"),
+    "E-LAUNCH":  ("环境", "App 拉不起来"),
+    "A-REJECT":  ("答案", "答案被复核驳回"),
+    "P-EMPTY":   ("感知", "树里没读到元素"),
+    "P-COVER":   ("感知", "屏幕没看全"),
+    "P-BLIND":   ("感知", "往没有元素的地方点"),
+    "D-LOOP":    ("决策", "动作被反复拒绝"),
+    "D-ANCHOR":  ("决策", "页面身份认不出"),
+    "X-UNKNOWN": ("未知", "未归类"),
+}
+
+
+def classify_code(stats):
+    """失败细类判定 → (code, family, name)。
+
+    stats 可含：login_wall(bool) / timeout(bool) / open_app_fail / done_rejects /
+    min_elems / x_cov(float) / blind_taps / max_block_streak / anchor_miss
+    优先级从"外因"到"内因"：环境 > 答案 > 感知 > 决策 > 未知。
+    外因优先，是因为外因一旦成立，内因的统计就不可信（比如登录墙下点不动，
+    不代表决策有问题）。
+    """
+    s = stats or {}
+
+    def num(k, d=0):
+        try:
+            return int(s.get(k) or d)
+        except Exception:
+            return d
+
+    if s.get("login_wall"):
+        code = "E-LOGIN"
+    elif s.get("timeout"):
+        code = "E-TIMEOUT"
+    elif num("open_app_fail") >= 2:
+        code = "E-LAUNCH"
+    elif num("done_rejects") >= 2:
+        code = "A-REJECT"
+    elif num("min_elems", 99) < PERCEPT_MIN_ELEMS:
+        code = "P-EMPTY"
+    elif float(s.get("x_cov") or 0) and float(s.get("x_cov") or 0) < PERCEPT_X_BAD:
+        code = "P-COVER"
+    elif num("blind_taps") >= 3:
+        code = "P-BLIND"
+    elif num("max_block_streak") >= 3:
+        code = "D-LOOP"
+    elif num("anchor_miss") >= 5:
+        code = "D-ANCHOR"
+    else:
+        code = "X-UNKNOWN"
+    fam, name = FAIL_CODE_NAMES.get(code, FAIL_CODE_NAMES["X-UNKNOWN"])
+    return code, fam, name
+
+
 # ================================================================ 开工可行性
 def feasibility_check(plan, apps=None, task="", family="", elems=None):
     """开工前可行性 —— **只做高置信度拦截**（宁可放行，不可误拦）。
@@ -1342,6 +1447,25 @@ def _selftest():
     st3, pat3 = classify_failure({"min_elems": 40, "open_app_fail": 3,
                                   "last_err": "本机未安装该应用（包名 com.miui.weather"})
     chk("归类 执行 + pattern", st3 == "执行" and pat3.startswith("open_app"))
+
+    # —— 感知健康度（2026-10-28）——
+    _mid = [(i, 658 + i * 40, 300 + i * 20, "e%d" % i, True) for i in range(20)]
+    h0 = percept_health([], 2160, 1350)
+    chk("感知度 空清单→empty", h0["level"] == "empty")
+    h1 = percept_health(_mid, 2160, 1350)
+    chk("感知度 只覆盖中间 39%→bad（酷安实测形态）",
+        h1["level"] == "bad" and 0.35 < h1["x_cov"] < 0.45)
+    _full = [(i, 40 + (i % 10) * 210, 60 + (i // 10) * 700, "e%d" % i, True) for i in range(20)]
+    h2 = percept_health(_full, 2160, 1350)
+    chk("感知度 铺满→ok", h2["level"] == "ok")
+
+    # —— 失败细类（2026-10-28）——
+    chk("细类 登录墙优先", classify_code({"login_wall": True, "min_elems": 1})[0] == "E-LOGIN")
+    chk("细类 覆盖不全（元素够多但只看到一半）",
+        classify_code({"min_elems": 25, "x_cov": 0.39})[0] == "P-COVER")
+    chk("细类 元素不足", classify_code({"min_elems": 2, "x_cov": 0.39})[0] == "P-EMPTY")
+    chk("细类 盲点点击", classify_code({"min_elems": 30, "blind_taps": 4})[0] == "P-BLIND")
+    chk("细类 未知兜底", classify_code({})[0] == "X-UNKNOWN")
 
     chk("可行性 规划缺失→不拦（防误拦）", feasibility_check({}, apps=[])[0] is True)
     chk("可行性 明确没听懂→拦",
