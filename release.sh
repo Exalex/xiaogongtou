@@ -27,7 +27,11 @@ VERSION=$(grep -o 'versionName="[^"]*"' entry/AndroidManifest.xml | head -1 | cu
 VCODE=$(grep -o 'versionCode="[^"]*"' entry/AndroidManifest.xml | head -1 | cut -d'"' -f2)
 [ -n "$VERSION" ] || { echo "读不到 versionName，检查 entry/AndroidManifest.xml" >&2; exit 1; }
 TAG="v${VERSION}"
-[ "$TAG_ARG" = "--no-tag" ] && TAG="" || [ -n "$TAG_ARG" ] && TAG="$TAG_ARG"
+if [ "$TAG_ARG" = "--no-tag" ]; then
+  TAG=""
+elif [ -n "$TAG_ARG" ]; then
+  TAG="$TAG_ARG"
+fi
 
 echo "== 版本 $VERSION (vc$VCODE)  tag=${TAG:-<不打>}"
 
