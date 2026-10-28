@@ -233,6 +233,113 @@ def need_home(pkg, elems=None, act="", fp=None, cards=None, target=None):
     return False
 
 
+# ================================================================ 任务账本（2026-10-28）
+class TaskLedger:
+    """跨步 / 跨 App 的「我来过哪、试过什么不行、拿到了什么」。
+
+    治两个病：
+      ① 动作循环 —— 模型不记得"这个坐标已经点 4 次没反应"，于是继续点
+         （真机实测：查电池电量 11 步里 8 步在「点图标 ↔ 按返回」之间来回）
+      ② 跨 App 断片 —— 每步只给最近 4 步历史，换个 App 就忘了上一个采到了什么
+    只存结论不存过程，长度有硬上限，避免把提示词撑爆（宁少不滥）。
+    """
+
+    def __init__(self, max_dead=6, max_visit=8, max_data=6):
+        self.dead = []      # [(做什么, 为什么不行)]
+        self.visited = []   # ["包名/页面"]
+        self.data = []      # [(来源, 摘要)]
+        self._md, self._mv, self._mx = max_dead, max_visit, max_data
+
+    def dead_end(self, what, why=""):
+        key = (str(what or "")[:40], str(why or "")[:20])
+        if not key[0] or key in self.dead:
+            return
+        self.dead.append(key)
+        self.dead = self.dead[-self._md:]
+
+    def visit(self, pkg, page=""):
+        k = "%s%s" % (pkg or "?", ("/" + page) if page else "")
+        if k == "?" or k in self.visited:
+            return
+        self.visited.append(k)
+        self.visited = self.visited[-self._mv:]
+
+    def add_data(self, src, text):
+        t = (str(text) or "").strip()[:60]
+        if not t:
+            return
+        self.data.append((str(src or "")[:16], t))
+        self.data = self.data[-self._mx:]
+
+    def render(self):
+        out = []
+        if self.dead:
+            out.append("已经试过但没用的做法（不要再重复）：" + "；".join(
+                "%s（%s）" % (a, b) if b else a for a, b in self.dead[-4:]))
+        if self.data:
+            out.append("本次已经拿到的数据：" + "；".join(
+                "%s→%s" % (a, b) for a, b in self.data))
+        if len(self.visited) > 1:      # 只在一个页面时没必要占字数
+            out.append("本次进过的位置：" + " → ".join(self.visited[-5:]))
+        return ("\n\n【任务账本】" + "\n".join(out)) if out else ""
+
+
+
+BACK_WORDS_CN = ("返回", "上一级", "向上", "后退")
+BACK_WORDS_EN = ("back", "up", "navigate up", "back button", "go back")
+
+
+def needs_back(elems, sw=0, sh=0):
+    """当前页面是否"在子页面、该退回根页面"——不依赖任何 App 卡片。
+
+    2026-10-28 新增。背景：起点归位原来只认 app_cards 里手写的 home_path，
+    没有卡片的 App（设置 / 应用宝 / 头条）直接放弃归位 → App 恢复到上次的子页后，
+    模型只能在「点图标 ↔ 按返回」之间来回循环（真机实测：查电池电量 11 步失败）。
+
+    判据（两条同时成立才判"该回退"，宁可不动也不乱按）：
+      ① 标题栏区域（y < sh*0.12）有"返回语义"的可点元素 —— 子页面的标志
+      ② 屏幕底部没有全局导航（y > sh*0.85 的可点元素 < 3）—— 根页面的标志
+
+    根页面两条都不会同时成立：有底部导航 → ②不成立；没有返回箭头 → ①不成立。
+    sw/sh 缺失时用元素包围盒估算（精度打折），建议调用方传真实屏幕尺寸。
+    """
+    es = [e for e in (elems or []) if len(e) > 4]
+    if len(es) < 4:
+        return False
+    if not sw:
+        sw = int(max([e[1] for e in es] or [0]) * 1.15)
+    if not sh:
+        sh = int(max([e[2] for e in es] or [0]) * 1.15)
+    if not sw or not sh:
+        return False
+
+    top_y = sh * 0.12
+    bot_y = sh * 0.85
+
+    has_back = False
+    for e in es:
+        x, y, clickable = e[1], e[2], bool(e[4])
+        label = str(e[3] or "")
+        if not clickable or y >= top_y:
+            continue
+        if any(w in label for w in BACK_WORDS_CN):
+            has_back = True
+            break
+        low = label.strip().lower()
+        if low and low in BACK_WORDS_EN:
+            has_back = True
+            break
+        # 标题栏里贴最左边、又没有文字的元素：多数是返回箭头（无障碍描述常为空）
+        if not low and x <= sw * 0.08:
+            has_back = True
+            break
+    if not has_back:
+        return False
+
+    bottom_nav = sum(1 for e in es if e[4] and e[2] >= bot_y)
+    return bottom_nav < 3
+
+
 def home_steps(card):
     """卡片 home_path → 返航动作序列。
 
@@ -1311,6 +1418,20 @@ def _selftest():
     chk("home_steps 无tab→有界 BACK（≤3）",
         len(home_steps({"home_path": {"back": 3, "until": ["x"], "max_back": 5}})) == 3
         and home_steps({"home_path": {"back": 2, "until": ["x"]}})[0]["action"] == "key")
+
+    # —— 通用返航（2026-10-28）：不依赖 App 卡片 ——
+    _sub = [(0, 60, 60, "返回", True), (1, 800, 300, "WLAN", False),
+            (2, 800, 500, "已连接", False), (3, 900, 700, "添加网络", True)]
+    chk("返航 子页面（有返回箭头·无底部导航）→ 该回退", needs_back(_sub, 2160, 1350))
+    _root = [(0, 300, 1280, "首页", True), (1, 800, 1280, "消息", True),
+             (2, 1300, 1280, "我的", True), (3, 800, 400, "电池", False),
+             (4, 900, 600, "WLAN", False)]
+    chk("返航 根页面（有底部导航）→ 不回退", not needs_back(_root, 2160, 1350))
+    _mid = [(0, 800, 400, "标题文字", False), (1, 900, 600, "内容", False),
+            (2, 800, 800, "更多", True), (3, 700, 900, "其他", False)]
+    chk("返航 既无箭头也无导航 → 不乱按", not needs_back(_mid, 2160, 1350))
+    chk("返航 元素太少 → 不乱按", not needs_back(_sub[:2], 2160, 1350))
+
     chk("home_steps 无tab无back→空",
         home_steps({"home_path": {"until": ["x"]}}) == [])
     chk("entry_pages = 发现页", entry_pages(cards["com.sina.weibo"]) == ["发现页"])

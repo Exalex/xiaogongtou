@@ -74,10 +74,14 @@ SW_BUDGET  = os.environ.get("BUDGET", "1") == "1"       # 关卡〇 分级预算
 SW_FAMILY  = os.environ.get("FAMILIES", "1") == "1"     # 任务家族
 SW_HOME    = os.environ.get("HOME_RESET", "1") == "1"   # 关卡一 起点归位
 SW_SCRIPT  = os.environ.get("SCRIPT_REPLAY", "1") == "1"  # 关卡二 脚本重放
-SW_SKELETON = os.environ.get("SKELETON", "0") == "1"    # 关卡二' 规划骨架确定性执行
-#   ⚠️ 2026-10-12 默认**关**：用户定调"速度不是第一考量、准确率优先" —— 新任务**直接走
-#   模型逐步决策**（准确率最高），骨架只作为**规划建议**注入 prompt（render_plan），
-#   不再作为"廉价先行路径"。骨架执行仅留给实验（SKELETON=1）。
+SW_SKELETON = os.environ.get("SKELETON", "auto").lower() in ("1", "true", "on", "yes")
+_SKELETON_MODE = os.environ.get("SKELETON", "auto").lower()
+#   2026-10-12 原定调：默认**关**（用户要求"准确率优先、速度不是第一"），骨架只作为
+#   规划建议注入 prompt，执行留给实验（SKELETON=1）。
+#   2026-10-28 改为 auto：**只在"页面身份可校验"的 App 上开**（有 app_card.pages 定义，
+#   或命中 app_paths 导航图谱）。理由：骨架断链的根因是"到没到某页"判不出来
+#   （R5 难例：头条/B站 0/3），这两个条件恰好能补上这个前提；未知 App 照旧走自由循环。
+#   环境变量：SKELETON=1 强开 / SKELETON=0 强关 / 不设 = auto。
 SW_REVIEW  = os.environ.get("RESULT_REVIEW", "1") == "1"  # 关卡四 收工结果复核
 SW_SUBGOAL = os.environ.get("SUBGOALS", "1") == "1"     # 关卡三 子目标 + 每步验收
 SW_GUARDS  = os.environ.get("GUARDS", "1") == "1"       # 贯穿件 B 硬闸门
@@ -2339,6 +2343,36 @@ def alert_user(title, text, tracer=None):
         tracer.log(0, "result", "提醒用户: %s" % text)
 
 
+def _skeleton_ok(plan, task):
+    """规划骨架是否值得开（2026-10-28）。
+
+    骨架跑的是「按元素名解析坐标 → 执行 → 三级锚点核对」，核对不通过就整段断链
+    交回模型。R5 难例（头条 / B站 0/3）断的正是这一步 —— 根因是"到没到某页"判不出来。
+    两个信号说明这个前提成立：
+      ① 该 App 有 app_card.pages 定义（页面能认出来）
+      ② 命中 app_paths 导航图谱（入口路径有人写过）
+    两者都没有 → 不开，照旧走自由循环（避免"多花一次模型调用还断链"）。
+    """
+    if _SKELETON_MODE in ("1", "true", "on", "yes"):
+        return True
+    if _SKELETON_MODE in ("0", "false", "off", "no"):
+        return False
+    pk = (plan or {}).get("app_package") or ""
+    if not pk:
+        return False
+    try:
+        if ((app_cards() or {}).get(pk) or {}).get("pages"):
+            return True
+    except Exception:
+        pass
+    try:
+        if app_path_hint(pk, task or "", []):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _maybe_home_reset(pkg, elems, portal, tracer=None, done_set=None, target=None, fg_pkg=None):
     """关卡一 · 起点归位：目标 App 在前台但不在已知页（或落在死胡同页）→ 按卡片返航。
     返回 True=执行过归位。每个 App 每次运行最多归位一次（done_set 记账）。
@@ -2352,23 +2386,45 @@ def _maybe_home_reset(pkg, elems, portal, tracer=None, done_set=None, target=Non
         return False
     cards = app_cards()
     card = cards.get(pkg) or {}
-    if not card.get("home_path"):
-        return False
+    has_card_path = bool(card.get("home_path"))
+    # 2026-10-28 通用返航：没有 app_card 的 App（设置 / 应用宝 / 头条）以前在下一行
+    # 直接 return False，等于放弃归位 → App 恢复到上次子页后，模型只能「点图标 ↔ 按返回」
+    # 来回循环（真机实测：查电池电量 11 步失败，卡在 WLAN 页）。
+    # 现在改用"标题栏有返回箭头 且 底部无全局导航"这一通用判据，与卡片无关。
+    if not has_card_path:
+        if not SL.needs_back(elems, _SCREEN["w"], _SCREEN["h"]):
+            return False
+    else:
+        act = get_activity() if any(pg.get("activity") for pg in (card.get("pages") or [])) else ""
+        if not SL.need_home(pkg, elems, act, None, cards, target=target):
+            return False
     # 先点掉挡路的一次性弹窗 —— 否则"首页特征"被弹窗盖住，会被误判成"不在已知页"
     if _dismiss_popups(portal, elems, tracer):
         elems, _c = _script_elems(portal)
-    act = get_activity() if any(pg.get("activity") for pg in (card.get("pages") or [])) else ""
-    if not SL.need_home(pkg, elems, act, None, cards, target=target):
-        return False
-    steps = SL.home_steps(card)
+    if has_card_path:
+        steps = SL.home_steps(card)
+        until = SL.home_until(card)
+    else:
+        steps = [{"action": "key", "key_code": 4} for _ in range(3)]
+        until = []          # 无验收词 → 用"不再需要返回"当验收（见 _arrived）
     if not steps:
         return False
     if done_set is not None:
         done_set.add(pkg)
-    print("[agent] 起点归位：%s 当前不在已知页 → 执行 %d 步返航" % (pkg, len(steps)))
+    print("[agent] 起点归位：%s %s → 执行 %d 步返航"
+          % (pkg, "不在已知页" if has_card_path else "在子页面（通用判定）", len(steps)))
     if tracer:
-        tracer.log(0, "result", "起点归位 %s（%d 步）" % (pkg, len(steps)))
-    until = SL.home_until(card)
+        tracer.log(0, "result", "起点归位 %s（%d 步%s）"
+                   % (pkg, len(steps), "" if has_card_path else "·通用"))
+
+    def _arrived(el2):
+        if until:
+            return any(w in "|".join(str(e[3]) for e in el2) for w in until)
+        try:
+            return not SL.needs_back(el2, _SCREEN["w"], _SCREEN["h"])
+        except Exception:
+            return False
+
     ok = False
     # 逐步执行 + 每步验收：达标即停（多余的 BACK 会把 App 退到桌面）
     for a in steps:
@@ -2377,7 +2433,7 @@ def _maybe_home_reset(pkg, elems, portal, tracer=None, done_set=None, target=Non
         except Exception:
             pass
         el2, _c2 = _script_elems(portal)
-        if until and any(w in "|".join(str(e[3]) for e in el2) for w in until):
+        if _arrived(el2):
             ok = True
             break
         if _c2 and _c2 != pkg:
@@ -2392,10 +2448,10 @@ def _maybe_home_reset(pkg, elems, portal, tracer=None, done_set=None, target=Non
         for _ in range(3):                       # 页面可能还在渲染，补一轮等待
             time.sleep(1.0)
             el2, _c2 = _script_elems(portal)
-            if until and any(w in "|".join(str(e[3]) for e in el2) for w in until):
+            if _arrived(el2):
                 ok = True
                 break
-    print("[agent] 归位%s" % ("成功（已回到已知页）" if ok else "未确认（继续任务）"))
+    print("[agent] 归位%s" % ("成功（已回到根页面）" if ok else "未确认（继续任务）"))
     if tracer:
         tracer.log(0, "result", "归位%s" % ("成功" if ok else "未确认"))
     return True
@@ -2614,7 +2670,7 @@ def _jev_off():
 
 
 def decide(step, task, state, history, engine_now, elems, experience=None, related_apps=None,
-           plan=None, goal_text=""):
+           plan=None, goal_text="", ledger=None):
     """返回 (act, engine_name, seconds, trace_info)。trace_info = {"prompt":..., "reply":...}"""
     t0 = time.time()
     if engine_now == "jev" and (_JEV_FAILS[0] >= 2 or _jev_off()):
@@ -2734,11 +2790,12 @@ def decide(step, task, state, history, engine_now, elems, experience=None, relat
                           "先 tap 那个【输入框】元素，再 input_text。")
     except Exception:
         input_note = ""
-    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s%s%s%s%s\n\n"
+    ledger_note = ledger.render() if ledger is not None else ""
+    user = ("任务: %s%s%s%s\n\n第 %d 步。当前屏幕元素清单（[编号] 坐标 文本）：\n%s%s%s%s%s%s%s%s%s\n\n"
             "请输出下一步动作 JSON（点元素优先用 pick 报编号）。"
             % (task, plan_block, goal_block, page_note, step, screen,
                exp_block, app_hint, app_note, screen_size_note, coverage_note, input_note,
-               path_note))
+               path_note, ledger_note))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-10:] + \
                [{"role": "user", "content": user}]
     reply = call_llm(messages)
@@ -2865,6 +2922,9 @@ def main():
     min_elems_seen = 999       # 本次运行见过的最少元素数（感知是否失效）
     x_cov_min = 1.0            # 本次运行见过的最小横向覆盖率（2026-10-28：感知是否"半瞎"）
     percept_boost = [0]        # 感知降级已尝试次数（uiautomator 补通道，每任务只补一次）
+    # 2026-10-28 任务账本：跨步/跨 App 的"试过什么不行、进过哪、拿到什么"。
+    # 每步按需注入提示词（render 只出结论，长度有上限）。
+    ledger = SL.TaskLedger() if SL is not None else None
     anchor_miss = 0            # 页面身份未命中次数（锚点是否够硬）
     lock_strikes = 0           # 熄屏/锁屏连续命中（迭代5：≥2 判死，烧预算前 fail-fast）
     errs = []                  # 执行错误文案（供失败归类）
@@ -3070,7 +3130,7 @@ def main():
     #   故：规划期**一次**产出声明式骨架（按元素名，不写坐标）→ 执行期逐条"解析坐标 +
     #   执行 + 三级锚点核对"（**0 模型**）→ 某步核对失败 → 交回模型做局部恢复。
     #   仅在"没命中已固化脚本"时才走这条（已固化脚本是验证过的路径，优先级更高）。
-    if (SW_SKELETON and SL is not None and DISPLAY == 0 and plan and not _sc_hit):
+    if (_skeleton_ok(plan, task) and SL is not None and DISPLAY == 0 and plan and not _sc_hit):
         try:
             _sk = SL.compile_plan_steps(plan, plan.get("app_package") or "")
             if _sk:
@@ -3549,6 +3609,12 @@ def main():
                 tracer.log(step, "result", "页面身份: %s" % cur_page)
         except Exception:
             cur_page = ""
+        # —— 账本（2026-10-28）：记下"进过哪个 App 的哪个页面"，跨 App 任务才有痕迹 ——
+        try:
+            if ledger is not None and cur_pkg and not str(cur_pkg).startswith("("):
+                ledger.visit(cur_pkg, cur_page)
+        except Exception:
+            pass
         # —— 经验坐标注入：App 卡片实测坐标（如微博「更多热搜」「热搜」标签）→ 虚拟元素（Jev/qwen 可直接点） ——
         #    2026-10-11：页面过滤 + 坐标自校验 + 本次失效名单
         virt_injected = []
@@ -3725,7 +3791,8 @@ def main():
             # （此前 prompt/reply 都在返回后一起写，两个 ts 完全相同 → 度量全是 0）
             tracer.log(step, "prompt_start", "", engine=engine_now)
             act, eng, dec_dt, ti = decide(step, task, state, history, engine_now, elems,
-                                          experience, related_apps, plan, goal_text)
+                                          experience, related_apps, plan, goal_text,
+                                          ledger=ledger)
         except Exception as e:
             print("[step %d] decide error: %r" % (step, e))
             time.sleep(2)
@@ -3991,6 +4058,11 @@ def main():
             _near = label_at(elems, _bx, _by, tol=70)
             if not _near:
                 blind_taps[0] += 1
+                try:
+                    if ledger is not None:
+                        ledger.dead_end("点 (%d,%d)" % (_bx, _by), "那里没有元素")
+                except Exception:
+                    pass
                 _cov = percept_coverage(elems)
                 _hint = ("（系统警告）你刚点的坐标 (%d,%d) 附近**没有任何元素**，"
                          "点下去不会触发任何东西。请从上面的元素清单里用 pick 报编号来点击；"
@@ -4108,6 +4180,13 @@ def main():
             else:
                 exec_err = "该动作已连续多次失败/无效果（很可能无效/目标不存在）"
                 print("[step %d] BLOCK 重复失败动作: %s" % (step, sig))
+            # —— 账本（2026-10-28）：把"被拦下的做法"记成死路，下一轮提示词里直接告诉模型
+            #    "这条已经试过了"，不用它自己记得（它只记得最近 4 步，正好在这里断片） ——
+            try:
+                if ledger is not None:
+                    ledger.dead_end(action_to_line(act)[:36], (exec_err or "被拦截")[:16])
+            except Exception:
+                pass
         else:
             try:
                 if a == "tap":

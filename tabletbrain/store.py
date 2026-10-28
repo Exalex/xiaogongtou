@@ -99,31 +99,108 @@ def finish_session(rid, state, engine=None, usage=None, result=None, failed_reas
     txt = (result or "").strip() or ("任务未完成：" + (failed_reason or "未知原因"))
     add_message(rid, "assistant", txt, ts=ended)
     if (result or "").strip():
-        items = parse_list_items(result)
-        if items:
-            title = _list_title(result) or (task[:22] if task else "列表")
-            add_dataset(rid, topic=task or None, kind="list",
-                        title=title,
-                        columns=["序号", "内容"],
-                        rows=[[i + 1, t] for i, t in enumerate(items)], ts=ended)
+        try:
+            ingest_result(rid, task, result, ts=ended)
+        except Exception:
+            pass
+
+
+_NUM_ITEM = re.compile(
+    r"(?:^|[\s；;:：，,\n])[（(]?(\d{1,2})[）)]?\s*[\.、．:：\)]\s*([^；;：:\n]+)")
+_NUM_ITEM2 = re.compile(
+    r"(?:^|[\s；;:：，,\n])第\s*(\d{1,2})\s*[条名位个]\s*[:：、.．]?\s*([^；;：:\n]+)")
+# 只匹配「编号标记」本身（不含内容）—— 按标记位置切段才不会把相邻两项吞成一项
+# 注意：前置字符类必须含全角冒号「：」，否则「前三条是：1. 甲」第一条会漏
+_MARK = re.compile(
+    r"(?:^|[\s；;:：，,\n])(?:[（(]?(\d{1,2})\s*(?:[）)]|[\.、．:：\)])\s*"
+    r"|第\s*(\d{1,2})\s*[条名位个]\s*[:：、.．]?)\s*")
+_DASH_ITEM = re.compile(r"(?:^|\n)\s*[-·•*]\s+([^\n；;]+)")
+_FACT_ITEM = re.compile(r"第\s*(\d{1,2})\s*[条名位个]\s*是\s*[:：]?\s*([^\n；;]+)")
+_PLAIN_SPLIT = re.compile(r"\s*[/／、|｜]\s*")
 
 
 def parse_list_items(text):
-    """从答案文本里抽「1. xx；2. yy…」式编号列表；>=3 项且从 1 连续才认。返回 [item, ...] 或 None。"""
+    """从答案文本里抽编号列表 → [item, ...] 或 None。
+
+    2026-10-28 放宽。原规则要求「≥3 项且从 1 连续」，端侧实测（store.db：
+    sessions=10 / datasets=0）证明它把真实答案几乎全挡在门外 ——
+    「热搜前 2 条」「前 3 个应用」这类任务根本落不进数据仓。
+    现在：≥2 项即认，按出现顺序（允许不连续），并补 6 种常见写法
+    （`1.` / `1、` / `1)` / `（1）` / `第1条` / `- 无序`）。
+
+    实现要点：先只找「编号标记」的位置，再按标记切段取内容。
+    老写法用贪婪内容正则（`[^；;：:\n]+`）会把「1、甲 2）乙」整条吞成一项。
+    """
     if not text:
         return None
-    seen = {}
-    for m in _NUM_ITEM.finditer(text):
-        n = int(m.group(1))
-        t = m.group(2).strip().strip("。．. ")
-        if t and n not in seen:
-            seen[n] = t
-    if len(seen) < 3:
+    out = []
+    marks = list(_MARK.finditer(text))
+    if len(marks) >= 2:
+        for i, m in enumerate(marks):
+            start = m.end()
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+            t = text[start:end].strip().strip("。．. ；;，, ")
+            if t.startswith("是"):          # 「第N条是X」→ 别把"是："吃进内容
+                t = t.lstrip("是").lstrip("：: ")
+            if t:
+                out.append(t)
+    if not out:
+        for m in _DASH_ITEM.finditer(text):
+            t = m.group(1).strip().strip("。．.  ")
+            if t:
+                out.append(t)
+    if not out:
+        # 没有编号、但用「/」「、」「|」并列的答案（实测「读前 3 个应用名」
+        # 的典型输出就是「哔哩哔哩 / 酷安 / OneNote」）—— 保守认定：
+        # ≥3 段、每段 ≤24 字、整段没有句号，才当列表；否则一律不认。
+        t0 = (text or "").strip()
+        if t0 and len(t0) <= 120 and "。" not in t0:
+            parts = [p.strip() for p in _PLAIN_SPLIT.split(t0) if p.strip()]
+            if 3 <= len(parts) <= 12 and all(len(p) <= 24 for p in parts):
+                out = parts
+    dedup, res = set(), []
+    for t in out:
+        if t not in dedup:
+            dedup.add(t)
+            res.append(t)
+    return res if len(res) >= 2 else None
+
+
+def parse_single_fact(text):
+    """「第 N 条 / 第 N 名 是 X」这类单值答案 → (标签, 值) 或 None。"""
+    if not text:
         return None
-    ns = sorted(seen)
-    if ns != list(range(1, len(ns) + 1)):
+    m = _FACT_ITEM.search(text)
+    if not m:
         return None
-    return [seen[i] for i in range(1, len(ns) + 1)]
+    v = m.group(2).strip().strip("。．. ")
+    return ("第%s条" % m.group(1), v) if v else None
+
+
+def ingest_result(rid, task, result, ts=None):
+    """把一次任务的结果落成结构化数据（列表 或 单值）。返回写入条数。
+
+    2026-10-28 新增。这是「跨 App 汇总」的前提：前一个 App 采集到的东西必须
+    先变成结构化的一行一行，后面的环节才有东西可消费 —— 而不是只活在最后那句答案里。
+    """
+    txt = (result or "").strip()
+    if not txt or not rid:
+        return 0
+    init()
+    n = 0
+    items = parse_list_items(txt)
+    if items:
+        title = _list_title(txt) or ((task or "")[:22] or "列表")
+        add_dataset(rid, topic=task or None, kind="list", title=title,
+                    columns=["序号", "内容"],
+                    rows=[[i + 1, t] for i, t in enumerate(items)], ts=ts)
+        return 1
+    f = parse_single_fact(txt)
+    if f:
+        add_dataset(rid, topic=task or None, kind="fact", title=f[0],
+                    columns=["项", "值"], rows=[[f[0], f[1]]], ts=ts)
+        return 1
+    return n
 
 
 def _list_title(text):
@@ -234,3 +311,30 @@ def import_runs(runs_dir, limit=120):
         except Exception:
             continue
     return n
+
+
+def _selftest():
+    """纯解析函数自测（不碰数据库，PC 上可直接跑）。"""
+    fails = []
+
+    def chk(name, cond):
+        print("  %-34s %s" % (name, "PASS" if cond else "FAIL"))
+        if not cond:
+            fails.append(name)
+
+    chk("列表 老格式 3 项", len(parse_list_items("1. 甲\n2. 乙\n3. 丙") or []) == 3)
+    chk("列表 2 项也认（2026-10-28 放宽）", len(parse_list_items("1. 甲\n2. 乙") or []) == 2)
+    chk("列表 顿号/括号写法", len(parse_list_items("1、甲 2）乙") or []) == 2)
+    chk("列表 第N条写法", len(parse_list_items("第1条：甲；第2条：乙") or []) == 2)
+    chk("列表 无序 - 写法", len(parse_list_items("- 甲\n- 乙") or []) == 2)
+    chk("单条 第N条 不误判成列表", parse_list_items("第 3 条是：丙") is None)
+    _f = parse_single_fact("第 10 条是：Doinb回应al零胜十六强") or ("", "")
+    chk("单值 第N条是X", _f[1].startswith("Doinb"))
+    chk("纯叙述 → 不落库", parse_list_items("今天天气不错，没什么可列的。") is None)
+    print("全部通过" if not fails else "有 %d 项失败" % len(fails))
+    return 0 if not fails else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_selftest())
+
