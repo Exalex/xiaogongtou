@@ -24,28 +24,24 @@ except Exception:
 PY
 }
 
+# 2026-10-31：**不要用 pidof / ps 判 portal 在不在**。
+# Android 7+ 的 hidepid 让普通 app 看不到别的 app 进程，Termux 的 ps 也
+# 不支持 -o PID —— 结果每次自检都误判"进程不在"→ 无脑重启。
+# 唯一可信的活性信号是 HTTP /ping。
 check_portal() {
-  if ! pidof com.mobilerun.portal >/dev/null 2>&1; then
-    log "portal: process gone -> relaunch"
-    monkey -p com.mobilerun.portal -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
-    sleep 8
-  fi
-  if ! probe "http://127.0.0.1:8080/ping"; then
-    log "portal: 8080 down -> re-enable a11y + toggle socket"
-    settings put secure accessibility_enabled 0
-    settings put secure enabled_accessibility_services ''
-    sleep 1
-    settings put secure enabled_accessibility_services "$PORTAL_SVC:$ENTRY_SVC"
-    settings put secure accessibility_enabled 1
-    sleep 4
-    kill -9 "$(pidof com.mobilerun.portal)" 2>/dev/null
-    sleep 2
-    monkey -p com.mobilerun.portal -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
-    sleep 8
-    content insert --uri content://com.mobilerun.portal/toggle_socket_server --bind enabled:b:true >/dev/null 2>&1
-    sleep 3
-    if probe "http://127.0.0.1:8080/ping"; then log "portal: repaired OK"; else log "portal: repair FAILED"; fi
-  fi
+  probe "http://127.0.0.1:8080/ping" && return 0
+  log "portal: 8080 no answer -> re-enable a11y + relaunch + toggle socket"
+  settings put secure accessibility_enabled 0
+  settings put secure enabled_accessibility_services ''
+  sleep 1
+  settings put secure enabled_accessibility_services "$PORTAL_SVC:$ENTRY_SVC"
+  settings put secure accessibility_enabled 1
+  sleep 3
+  monkey -p com.mobilerun.portal -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+  sleep 8
+  content insert --uri content://com.mobilerun.portal/toggle_socket_server --bind enabled:b:true >/dev/null 2>&1
+  sleep 3
+  if probe "http://127.0.0.1:8080/ping"; then log "portal: repaired OK"; else log "portal: repair FAILED"; fi
 }
 
 check_console() {
